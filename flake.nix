@@ -88,6 +88,23 @@
           targetAttr = system;
         };
 
+      # The live medium. Local and unexported on purpose: a nixosModules entry
+      # would offer modules/installer.nix as something an operator could import
+      # into a host configuration — where it would turn that host into an
+      # installation CD. The ISO packages are the whole interface.
+      #
+      # The script is the derivation built right above rather than one the
+      # medium constructs of its own: plexsphere-install is parameterised at
+      # build time with the flake reference and the target attribute it
+      # installs, and a second derivation here would be one no check covers.
+      installerSystem = system: lib.nixosSystem {
+        inherit system;
+        modules = [
+          ./modules/installer.nix
+          { environment.systemPackages = [ (plexsphereInstallFor system) ]; }
+        ];
+      };
+
       pkgs = nixpkgs.legacyPackages.x86_64-linux;
 
       # The checks below force single options instead of instantiating a
@@ -122,6 +139,8 @@
         plexd = nixpkgs.legacyPackages.${system}.callPackage ./packages/plexd.nix { };
 
         plexsphere-install = plexsphereInstallFor system;
+
+        installer-iso = (installerSystem system).config.system.build.isoImage;
       });
 
       # Not the lib bound above — this is the flake output named lib, and the
@@ -461,6 +480,37 @@
               ${self.packages.x86_64-linux.plexsphere-install}/bin/plexsphere-install
             touch $out
           '';
+
+        # Only the x86_64 image is within reach of a build here: the aarch64
+        # one needs an aarch64 builder, which CI does not have. Evaluation is
+        # what both architectures share, and it is where every module-level
+        # error lives — a mistyped option, a volume ID over the 32-byte ISO
+        # 9660 limit, an installer package the medium cannot instantiate.
+        # Forcing drvPath alone stops at WHNF, exactly as
+        # example-hosts-evaluate does, so the check stays cheap.
+        installer-iso-evaluates = passIf "installer-iso-evaluates"
+          (lib.all (system: (installerSystem system).config.system.build.isoImage ? drvPath)
+            [ "x86_64-linux" "aarch64-linux" ])
+          "the installer medium must evaluate on both architectures";
+
+        # The check above forces the image and nothing in it, so dropping the
+        # systemPackages entry from installerSystem — in a refactor, a merge,
+        # a split of the ISO definition — leaves every check green and CI
+        # still printing an image size. The medium boots, the console says to
+        # run 'sudo plexsphere-install', and the command is not there. That
+        # lands on an operator who has already burnt the stick, so pin both
+        # halves: the script is on the medium, and the help line names it.
+        installer-medium-ships-the-script = passIf "installer-medium-ships-the-script"
+          (lib.all
+            (system:
+              let
+                script = plexsphereInstallFor system;
+                medium = (installerSystem system).config;
+              in
+              lib.elem script medium.environment.systemPackages
+              && lib.hasInfix script.name medium.services.getty.helpLine)
+            [ "x86_64-linux" "aarch64-linux" ])
+          "the installer medium must ship plexsphere-install and name it on the console";
       };
     };
 }
