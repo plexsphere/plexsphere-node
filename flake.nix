@@ -481,6 +481,27 @@
             touch $out
           '';
 
+        # The pre-flight probe decides whether a provisioning network that
+        # reaches a substituter and nothing else is caught before the first
+        # prompt or after every one of them, and the README is where an
+        # operator reads which names to let through an egress filter. Nothing
+        # but agreement ties the two lists together, and they were wrong
+        # together once: both named github.com, which nix never asks for —
+        # with flake.lock pinning a revision it resolves no ref, so each input
+        # costs one tarball fetch addressed to api.github.com and redirected
+        # to codeload.github.com. Pin the names in both places, so a probe
+        # that gains or loses a host without the README following fails here
+        # rather than on somebody's provisioning network.
+        installer-network-preflight-hosts =
+          pkgs.runCommand "installer-network-preflight-hosts" { } ''
+            for host in cache.nixos.org api.github.com codeload.github.com; do
+              grep -q -F -- "$host" \
+                ${self.packages.x86_64-linux.plexsphere-install}/bin/plexsphere-install
+              grep -q -F -- "$host" ${./README.md}
+            done
+            touch $out
+          '';
+
         # Only the x86_64 image is within reach of a build here: the aarch64
         # one needs an aarch64 builder, which CI does not have. Evaluation is
         # what both architectures share, and it is where every module-level
