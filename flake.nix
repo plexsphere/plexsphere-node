@@ -41,6 +41,33 @@
         modules = [ self.nixosModules.disk self.nixosModules.node exampleModule ];
       };
 
+      # What the live installer installs. Identity is deliberately absent:
+      # plexsphere.node.hostName has no default, so a target throws until the
+      # installer injects the identity it collected on the console, and
+      # plexsphere.node.sshAuthorizedKeys keeps its empty default, so no key
+      # from this repository can reach an installed node.
+      #
+      # The disk device is the one exception, and it needs both halves of what
+      # mkDefault gives: disko-install reads
+      # originalSystem.config.disko.devices.disk (install-cli.nix:32) before it
+      # applies the --system-config module, so the option has to resolve to
+      # something — while the installer's own definition, plain at priority
+      # 100, still has to win, because --system-config takes a module parsed
+      # from JSON and JSON cannot express mkForce.
+      installTarget = system: lib.nixosSystem {
+        inherit system;
+        modules = [
+          self.nixosModules.disk
+          self.nixosModules.node
+          {
+            system.stateVersion = "26.05";
+
+            plexsphere.disk.device =
+              lib.mkDefault "/dev/disk/by-id/REPLACE-ME-supplied-by-the-installer";
+          }
+        ];
+      };
+
       pkgs = nixpkgs.legacyPackages.x86_64-linux;
 
       # The checks below force single options instead of instantiating a
@@ -74,6 +101,16 @@
       packages = lib.genAttrs [ "x86_64-linux" "aarch64-linux" ] (system: {
         plexd = nixpkgs.legacyPackages.${system}.callPackage ./packages/plexd.nix { };
       });
+
+      # Not the lib bound above — this is the flake output named lib, and the
+      # name is doing work rather than describing anything: nix knows it and
+      # deliberately does not check it, so the targets below stay unforced.
+      # Under nixosConfigurations they would be forced, which no identity-free
+      # target survives, and they would sit in a `nixos-rebuild switch --flake
+      # .#…` attribute path (see example-hosts-evaluate). disko-install reaches
+      # them by name through a flake generated at ISO build time, so the
+      # attribute names below — the systems — are what the installer asks for.
+      lib.installTargets = lib.genAttrs [ "x86_64-linux" "aarch64-linux" ] installTarget;
 
       checks.x86_64-linux = {
         # Both example hosts set a key, so without this check only the passing
@@ -212,11 +249,73 @@
         # from installing a source-controlled root key on a real machine and
         # repointing its fileSystems at a device that does not exist — disko's
         # NixOS module defines fileSystems on activation without ever running
-        # the destructive script that would create them.
+        # the destructive script that would create them. A second reason keeps
+        # the output empty for the install targets too: nix flake check forces
+        # config.system.build.toplevel of every nixosConfigurations entry, and
+        # a target carrying no identity cannot be forced. Those live under
+        # lib.installTargets, where disko-install reaches them through a flake
+        # generated at ISO build time.
         example-hosts-evaluate = passIf "example-hosts-evaluate"
           (lib.all (system: (exampleHost system).config.system.build.toplevel ? drvPath)
             [ "x86_64-linux" "aarch64-linux" ])
           "the example host modules must evaluate on both architectures";
+
+        # Both halves of why the install targets are safe to export, each
+        # covering the other's blind spot. The absent output is what keeps
+        # nix flake check from forcing a toplevel no identity-free target can
+        # produce; the throwing hostName is what still makes a target useless
+        # to whoever exports one anyway, on the day someone does.
+        installer-target-not-deployable = passIf "installer-target-not-deployable"
+          (!(self ? nixosConfigurations)
+            && lib.all (target: evalThrows target.config.networking.hostName)
+              (lib.attrValues self.lib.installTargets))
+          "this flake must export no nixosConfigurations, and an install target must throw until the installer supplies plexsphere.node.hostName";
+
+        # placeholderKey is committed to this repository and both example
+        # hosts carry it. The install targets are the one place where a key
+        # left in a module would be written to somebody's disk, so the list
+        # they hand to sshd has to stay empty until the installer fills it.
+        installer-target-carries-no-key = passIf "installer-target-carries-no-key"
+          (lib.all (target: target.config.users.users.root.openssh.authorizedKeys.keys == [ ])
+            (lib.attrValues self.lib.installTargets))
+          "an install target must authorize no SSH key of its own";
+
+        # system.stateVersion keys the backwards-compatible defaults nixpkgs
+        # holds for stateful services, and a fresh install declares the
+        # release it was installed under — which for the medium is whatever
+        # nixpkgs.url resolves to. It stays a literal rather than becoming
+        # config.system.nixos.release: a derived value would move on the next
+        # bump, on installed nodes too, which is the drift the option exists
+        # to prevent. So the coupling is pinned the way every other cross-file
+        # string in this flake is pinned, rather than left to two lines that
+        # happen to agree.
+        installer-target-state-version = passIf "installer-target-state-version"
+          (self.lib.installTargets.x86_64-linux.config.system.stateVersion == lib.trivial.release)
+          "the install target's system.stateVersion must equal the release of the pinned nixpkgs; a fresh install declares the release it was installed under";
+
+        # disko-install injects the collected identity by handing
+        # extendModules a module it parsed from JSON (install-cli.nix:37-59),
+        # so extending a target here exercises the mechanism the installer
+        # actually uses. The device is the assertion that earns its keep: it
+        # is what proves a plain definition beats the mkDefault placeholder,
+        # which is the whole reason the placeholder is a mkDefault.
+        installer-target-accepts-injected-identity =
+          let
+            installed = self.lib.installTargets.x86_64-linux.extendModules {
+              modules = [
+                {
+                  plexsphere.node.hostName = "check-node";
+                  plexsphere.node.sshAuthorizedKeys = [ placeholderKey ];
+                  plexsphere.disk.device = "/dev/disk/by-id/check-disk";
+                }
+              ];
+            };
+          in
+          passIf "installer-target-accepts-injected-identity"
+            (installed.config.system.build.toplevel ? drvPath
+              && installed.config.networking.hostName == "check-node"
+              && installed.config.disko.devices.disk.main.device == "/dev/disk/by-id/check-disk")
+            "an install target extended with a host name, an SSH key and a disk device must evaluate, take the injected host name, and let the plain device definition override the mkDefault placeholder";
       };
     };
 }
