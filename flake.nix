@@ -68,6 +68,16 @@
         ];
       };
 
+      # The flake disko-install is actually handed, because this one exports
+      # no nixosConfigurations for it to resolve. Built per system rather than
+      # once: the derivation carries its own system and has to be realisable
+      # in the closure of the ISO that ships it, even though the text it
+      # writes is identical for both.
+      installTargetFlakeFor = system:
+        nixpkgs.legacyPackages.${system}.callPackage ./packages/install-target-flake.nix {
+          flakeSource = self;
+        };
+
       pkgs = nixpkgs.legacyPackages.x86_64-linux;
 
       # The checks below force single options instead of instantiating a
