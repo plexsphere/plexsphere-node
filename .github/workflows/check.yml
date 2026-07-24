@@ -1,0 +1,53 @@
+name: check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: cachix/install-nix-action@630ae543ea3a38a9a4166f03376c02c50f408342 # v31
+        with:
+          extra_nix_config: "experimental-features = nix-command flakes"
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+      # This also covers both example hosts: the example-hosts-evaluate check
+      # forces config.system.build.toplevel for each architecture, so no
+      # per-architecture eval step is needed. --all-systems adds the aarch64
+      # per-system outputs an x86_64 runner would otherwise skip.
+      - name: flake check
+        run: nix flake check --all-systems
+      - name: verify pinned plexd release binaries
+        run: |
+          set -euo pipefail
+          version=$(nix eval --raw .#packages.x86_64-linux.plexd.version)
+          verify() {
+            # Realizing the fixed-output fetch is what checks the pinned SRI
+            # hash — everything above is evaluation only, so a mistyped or
+            # swapped hash would otherwise first surface on a real deploy.
+            # cosign then proves those exact bytes came from the plexd release
+            # pipeline, not just from the same release page as the checksums.
+            binary=$(nix build --no-link --print-out-paths ".#packages.x86_64-linux.plexd.sources.$1")
+            curl -sSfL -o "$2.sigstore.json" \
+              "https://github.com/plexsphere/plexd/releases/download/v$version/plexd-linux-$2.sigstore.json"
+            # The Fulcio SAN is
+            # https://github.com/OWNER/REPO/.github/workflows/FILE@REF, so
+            # anchoring on the repository alone would accept a signature from
+            # any workflow on any branch or pull-request ref — including one
+            # an outside contributor can trigger. Pin the release workflow and
+            # the tag refs it runs on; that also fixes the release URL above
+            # to plexd's own releases, since curl -L normalizes '..'.
+            cosign verify-blob \
+              --certificate-identity-regexp '^https://github\.com/plexsphere/plexd/\.github/workflows/release\.yml@refs/tags/v' \
+              --certificate-github-workflow-repository plexsphere/plexd \
+              --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+              --bundle "$2.sigstore.json" "$binary"
+          }
+          verify x86_64-linux amd64
+          verify aarch64-linux arm64
