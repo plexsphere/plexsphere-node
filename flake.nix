@@ -78,6 +78,16 @@
           flakeSource = self;
         };
 
+      # One helper for both the package output and the ISO that will ship the
+      # script, so the derivation an operator runs is the one writeShellApplication
+      # put through shellcheck at build time.
+      plexsphereInstallFor = system:
+        nixpkgs.legacyPackages.${system}.callPackage ./packages/plexsphere-install.nix {
+          diskoInstall = disko.packages.${system}.disko-install;
+          targetFlake = installTargetFlakeFor system;
+          targetAttr = system;
+        };
+
       pkgs = nixpkgs.legacyPackages.x86_64-linux;
 
       # The checks below force single options instead of instantiating a
@@ -110,6 +120,8 @@
 
       packages = lib.genAttrs [ "x86_64-linux" "aarch64-linux" ] (system: {
         plexd = nixpkgs.legacyPackages.${system}.callPackage ./packages/plexd.nix { };
+
+        plexsphere-install = plexsphereInstallFor system;
       });
 
       # Not the lib bound above — this is the flake output named lib, and the
@@ -149,6 +161,49 @@
               ("ssh-rsa " + lib.removePrefix "ssh-ed25519 " placeholderKey)
             ])
           "a syntactically invalid plexsphere.node.sshAuthorizedKeys entry must fail the assertion";
+
+        # The shapes above are what a paste gets wrong. These four are what
+        # ssh-keygen -l accepts and this option does not, which makes them the
+        # rule the installer has to restate: it fingerprints fetched keys with
+        # ssh-keygen and would otherwise print every one of them as
+        # authorized, take the operator's confirmation, and fail this
+        # assertion once disko-install builds the closure — with every answer
+        # already given. The installer deals with them at the prompt instead
+        # (packages/plexsphere-install.nix): it rejects the first two outright
+        # and normalizes the last two, which are whitespace and not identity.
+        # Relaxing a rule here has to change that script too.
+        installer-key-rules-match-the-module =
+          let
+            # https://github.com/<user>.keys emits keys with no comment, which
+            # is what puts the carriage return of a CRLF file directly behind
+            # the blob — where the optional comment group, which starts with a
+            # literal space, cannot absorb it.
+            commentless =
+              lib.concatStringsSep " " (lib.take 2 (lib.splitString " " placeholderKey));
+          in
+          passIf "installer-key-rules-match-the-module"
+            (lib.all
+              (key: assertionFired
+                (evalNode [ hostName { plexsphere.node.sshAuthorizedKeys = [ key ]; } ])
+                "sshAuthorizedKeys")
+              [
+                # An authorized_keys options prefix. ssh-keygen -l skips over
+                # it and fingerprints the key behind it; no pattern here
+                # allows a field in front of the key type.
+                ("restrict,command=\"true\" " + placeholderKey)
+                # A 1024-bit RSA key, generated for this check. ssh-keygen -l
+                # prints it as any other; the {356,} blob floor of the ssh-rsa
+                # pattern, which is that of a 2048-bit key, is what rejects it.
+                "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAAAgQCw3E2593kkX4ILCt+BbJ44RBInW2oQ9lWu58VDl61YKf6Lg2Rb9lx6f5IcRMtgjnNxC1N/LNiXQFVwmUtZ2XUQxpuhIrws+4QLYbq3+RGA0U1yE8uiUq3ljAA9YiFOsTdIu2jZbNInBGBS5eJlAgE+wyOb2W7DKrwBFjjtzTHkow== weak@example.invalid"
+                # A CRLF line ending, which a self-hosted authorized_keys file
+                # can carry and read -r leaves in place: carriage return is
+                # not in IFS. ssh-keygen -l fingerprints the line and prints
+                # "no comment"; the patterns here match the whole line.
+                (commentless + "\r")
+                # A run of blanks where the patterns spell exactly one space.
+                ("ssh-ed25519  " + lib.removePrefix "ssh-ed25519 " placeholderKey)
+              ])
+            "plexsphere.node.sshAuthorizedKeys must reject an authorized_keys options prefix, an RSA key below 2048 bits, a CRLF line ending and a run of blanks between the fields — the four shapes ssh-keygen -l fingerprints without complaint, which the installer has to reject or normalize at the prompt on this option's behalf";
 
         # hostName has no default because k3s derives the Kubernetes node name
         # from it, and two nodes sharing one contend for the same Node object.
@@ -326,6 +381,86 @@
               && installed.config.networking.hostName == "check-node"
               && installed.config.disko.devices.disk.main.device == "/dev/disk/by-id/check-disk")
             "an install target extended with a host name, an SSH key and a disk device must evaluate, take the injected host name, and let the plain device definition override the mkDefault placeholder";
+
+        # The check above covers the three mandatory fields; these are the two
+        # the script writes only when the operator answered the prompt, and
+        # neither is validated for it. An option renamed under
+        # plexsphere.node throws — that is what the assert forces — but
+        # services.plexd.settings is freeform (modules/plexd.nix:19-23), so a
+        # jq path drifting from plexd's schema, .api.baseUrl for
+        # .api.base_url, evaluates cleanly and leaves the node registering
+        # against the preset instead: the operator answered the prompt, saw
+        # the answer printed back, and gets a node talking to the wrong
+        # control plane with no error anywhere. plexd-settings-override pins
+        # the module half of this contract and stops one string short of the
+        # installer half.
+        installer-injects-optional-identity =
+          let
+            installed = self.lib.installTargets.x86_64-linux.extendModules {
+              modules = [
+                {
+                  plexsphere.node.hostName = "check-node";
+                  plexsphere.node.sshAuthorizedKeys = [ placeholderKey ];
+                  plexsphere.disk.device = "/dev/disk/by-id/check-disk";
+                  plexsphere.node.hashedPasswordFile = "/etc/plexsphere/root-password-hash";
+                  services.plexd.settings.api.base_url = "https://api.internal.example";
+                }
+              ];
+            };
+          in
+          assert installed.config.users.users.root.hashedPasswordFile
+            == "/etc/plexsphere/root-password-hash";
+          pkgs.runCommand "installer-injects-optional-identity" { } ''
+            grep -q -F -- '.plexsphere.node.hashedPasswordFile = "/etc/plexsphere/root-password-hash"' \
+              ${self.packages.x86_64-linux.plexsphere-install}/bin/plexsphere-install
+            grep -q -F -- '.services.plexd.settings.api.base_url = $url' \
+              ${self.packages.x86_64-linux.plexsphere-install}/bin/plexsphere-install
+            rendered=${installed.config.environment.etc."plexd/config.yaml".source}
+            grep -q 'https://api.internal.example' "$rendered"
+            ! grep -q 'api.plexsphere.com' "$rendered"
+            touch $out
+          '';
+
+        # The installer names the disko disk in a string, so renaming
+        # disko.devices.disk.main in modules/disk.nix leaves it passing --disk
+        # with a name the target no longer declares. disko-install demands one
+        # mapping per declared disk and throws "No device passed for disk"
+        # otherwise (install-cli.nix:13-19), so nothing is written — but the
+        # failure lands on an operator who has already burned the medium and
+        # answered every prompt. The assertion pins the declared name, the
+        # grep pins the one that ships, and the rename fails in CI instead.
+        installer-targets-declared-disk =
+          assert lib.attrNames self.lib.installTargets.x86_64-linux.config.disko.devices.disk == [ "main" ];
+          pkgs.runCommand "installer-targets-declared-disk" { } ''
+            grep -q -F -- '--disk main' \
+              ${self.packages.x86_64-linux.plexsphere-install}/bin/plexsphere-install
+            touch $out
+          '';
+
+        # Three strings connected by interpolation alone: the generated flake
+        # republishes lib.installTargets as nixosConfigurations out of this
+        # flake's own source, and the installer asks that flake for one target
+        # by name. Renaming a target or pointing the script at a different
+        # flake breaks the chain without touching either end of it, and the
+        # break only shows when disko-install fails to resolve the attribute
+        # on a machine that has already been booted from the medium. The
+        # attribute path the generated flake reads is a fourth link that no
+        # interpolation carries: the assert below covers the output this flake
+        # exports, which a typo inside that generated line leaves standing, so
+        # the path is greped for as well.
+        installer-flake-wiring =
+          assert self.lib.installTargets ? x86_64-linux;
+          pkgs.runCommand "installer-flake-wiring" { } ''
+            grep -q nixosConfigurations \
+              ${installTargetFlakeFor "x86_64-linux"}/flake.nix
+            grep -q -F -- '${self}' \
+              ${installTargetFlakeFor "x86_64-linux"}/flake.nix
+            grep -q -F -- '.lib.installTargets' \
+              ${installTargetFlakeFor "x86_64-linux"}/flake.nix
+            grep -q -F -- '--flake ${installTargetFlakeFor "x86_64-linux"}#x86_64-linux' \
+              ${self.packages.x86_64-linux.plexsphere-install}/bin/plexsphere-install
+            touch $out
+          '';
       };
     };
 }
