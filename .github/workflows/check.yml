@@ -51,3 +51,31 @@ jobs:
           }
           verify x86_64-linux amd64
           verify aarch64-linux arm64
+
+  installer:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: cachix/install-nix-action@630ae543ea3a38a9a4166f03376c02c50f408342 # v31
+        with:
+          extra_nix_config: "experimental-features = nix-command flakes"
+      # No cosign installer here, unlike the check job: this job only builds an
+      # image out of this flake and never fetches a signed plexd release.
+      #
+      # The image size is the one property of the medium that no evaluation
+      # reveals, and it is what decides whether the result still fits the stick
+      # an operator reaches for, so print it on every run rather than waiting
+      # for a burn to fail.
+      - name: build x86_64 installer image
+        run: |
+          set -euo pipefail
+          out=$(nix build --no-link --print-out-paths .#packages.x86_64-linux.installer-iso)
+          du -h "$out"/iso/*.iso
+      # Only evaluated, not built: producing the aarch64 image needs an aarch64
+      # builder, which an ubuntu-latest runner is not and emulation would not
+      # make affordable. Evaluation still forces every module of the medium, so
+      # a broken option, a failing assertion or a missing package surfaces here
+      # just as it would in a build — what is skipped is squashing and
+      # mastering an image nothing in CI boots.
+      - name: evaluate aarch64 installer image
+        run: nix eval .#packages.aarch64-linux.installer-iso.drvPath
