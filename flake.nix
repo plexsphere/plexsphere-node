@@ -173,6 +173,31 @@
             touch $out
           '';
 
+        # The sibling provisioning paths of issues #3 and #5 inherit this
+        # module, so a later relaxation of either half of the posture would
+        # reach them without a word: an sshd setting flipped back would carry
+        # the console credential onto the network, and a hash assigned to
+        # users.users.root.hashedPassword instead of the file would land it in
+        # the world-readable store. Pin both halves, and the untouched default.
+        password-file-stays-console-only =
+          let
+            host = evalNode [
+              hostName
+              sshKey
+              { plexsphere.node.hashedPasswordFile = "/etc/plexsphere/root-password-hash"; }
+            ];
+            sshd = host.config.services.openssh.settings;
+            root = host.config.users.users.root;
+          in
+          passIf "password-file-stays-console-only"
+            (sshd.PasswordAuthentication == false
+              && sshd.KbdInteractiveAuthentication == false
+              && sshd.PermitRootLogin == "prohibit-password"
+              && root.hashedPasswordFile == "/etc/plexsphere/root-password-hash"
+              && root.hashedPassword == null
+              && defaultNode.config.users.users.root.hashedPasswordFile == null)
+            "plexsphere.node.hashedPasswordFile must reach users.users.root.hashedPasswordFile, leave users.users.root.hashedPassword unset so no hash reaches the Nix store, stay unset when the option is not given, and must not relax the sshd posture that confines the credential to the console";
+
         # Applying the layout is destructive and irreversible, so the target
         # must be named per host rather than defaulted.
         disk-device-required = passIf "disk-device-required"

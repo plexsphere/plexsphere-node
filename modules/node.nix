@@ -59,6 +59,29 @@ in
         leaves the node unreachable after rebuild.
       '';
     };
+
+    hashedPasswordFile = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      example = "/etc/plexsphere/root-password-hash";
+      description = ''
+        Path to a file holding a single line: the root password as a crypt(3)
+        hash, in the form `mkpasswd` produces. nixpkgs reads the file on every
+        system activation, not at build time (see
+        `nixos/modules/config/users-groups.nix`).
+
+        The value is a plain filesystem path, never a store path, so the hash
+        stays out of the world-readable Nix store — that is the reason this
+        option exists instead of `users.users.root.hashedPassword`.
+
+        The credential authenticates at the machine's physical or serial
+        console only: the profile keeps `PasswordAuthentication = false`,
+        `KbdInteractiveAuthentication = false` and
+        `PermitRootLogin = "prohibit-password"`, so it buys a way in when the
+        network or k3s is broken. It is no substitute for
+        `sshAuthorizedKeys`, which stays mandatory.
+      '';
+    };
   };
 
   config = {
@@ -72,6 +95,13 @@ in
     networking.hostName = cfg.hostName;
 
     users.users.root.openssh.authorizedKeys.keys = cfg.sshAuthorizedKeys;
+
+    # mkIf rather than a plain assignment: with the option unset this defines
+    # nothing at all, leaving nixpkgs' own null default standing and a host
+    # free to set users.users.root.hashedPasswordFile itself without colliding
+    # with a definition from here.
+    users.users.root.hashedPasswordFile =
+      lib.mkIf (cfg.hashedPasswordFile != null) cfg.hashedPasswordFile;
 
     services.openssh = {
       enable = true;
