@@ -79,3 +79,48 @@ jobs:
       # mastering an image nothing in CI boots.
       - name: evaluate aarch64 installer image
         run: nix eval .#packages.aarch64-linux.installer-iso.drvPath
+
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      # disko's builder is nixpkgs' vmTools.runInLinuxVM, whose derivation
+      # requires the kvm system feature. The Nix daemon advertises it when
+      # /dev/kvm exists and hands the device into the sandbox, where the
+      # build runs as an unprivileged user outside the kvm group, so the
+      # device has to be world-writable. The rule is the one GitHub's
+      # changelog prescribes for hosted Linux runners
+      # (https://github.blog/changelog/2024-04-02-github-actions-hardware-accelerated-android-virtualization-now-available/),
+      # and it runs before Nix is installed so it is in place when the daemon
+      # starts. If the build still stops because the kvm system feature is
+      # missing, the daemon did not detect the device: add
+      # system-features = nixos-test benchmark big-parallel kvm to
+      # extra_nix_config below.
+      - name: open /dev/kvm to the nix build users
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - uses: cachix/install-nix-action@630ae543ea3a38a9a4166f03376c02c50f408342 # v31
+        with:
+          extra_nix_config: "experimental-features = nix-command flakes"
+      # No cosign installer here either: the plexd binaries the image carries
+      # come from the pinned fixed-output fetches the check job verifies.
+      #
+      # The size of the compressed qcow2 is what every upload to an image
+      # service transfers, and no evaluation reveals it, so print it on every
+      # run.
+      - name: build x86_64 machine image
+        run: |
+          set -euo pipefail
+          out=$(nix build --no-link --print-out-paths .#packages.x86_64-linux.image)
+          du -h "$out"/*.qcow2
+      # Only evaluated, not built: producing the aarch64 image needs an aarch64
+      # builder, which an ubuntu-latest runner is not and emulation would not
+      # make affordable. Evaluation still forces every module of the image, so
+      # a broken option, a failing assertion or a missing package surfaces here
+      # just as it would in a build. What is skipped is installing the node
+      # into a disk image nothing in CI boots.
+      - name: evaluate aarch64 machine image
+        run: nix eval .#packages.aarch64-linux.image.drvPath
