@@ -267,6 +267,17 @@
           ])
           "the plexd unit must mask k3s' state and the root-equivalent sockets under /run";
 
+        # plexd up probes the nftables backend over netlink before it
+        # registers and exits when the probe is refused, so a unit that lost
+        # CAP_NET_ADMIN or AF_NETLINK would never join the mesh and would
+        # restart on that error forever.
+        plexd-sandbox-grants-net-admin = passIf "plexd-sandbox-grants-net-admin"
+          (let service = defaultNode.config.systemd.services.plexd.serviceConfig; in
+          lib.all (key: lib.elem "CAP_NET_ADMIN" (lib.splitString " " service.${key}))
+            [ "AmbientCapabilities" "CapabilityBoundingSet" ]
+          && lib.elem "AF_NETLINK" service.RestrictAddressFamilies)
+          "the plexd unit must keep CAP_NET_ADMIN and AF_NETLINK, or plexd fails its firewall pre-flight before registering";
+
         # With the firewall standing in front of plexd, the one port peers
         # dial has to stay open and follow a changed listen_port.
         plexd-wireguard-port-open = passIf "plexd-wireguard-port-open"
