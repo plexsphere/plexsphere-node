@@ -397,6 +397,63 @@
           }).config.disko.devices.disk.main.device)
           "plexsphere.disk.device must have no default";
 
+        # The hybrid mode as the machine image turns it on, on a host that is
+        # not the image, so a regression in the disk module is reported
+        # against the module. grub.devices is pinned to exactly one entry:
+        # disko adds the disk for the EF02 partition by itself, and a second
+        # definition from modules/disk.nix would list it twice and make
+        # install-grub.pl run grub-install twice on the same device.
+        disk-bios-boot-hybrid =
+          let
+            host = ((exampleHost "x86_64-linux").extendModules {
+              modules = [ { plexsphere.disk.biosBoot = true; } ];
+            }).config;
+            partitions = host.disko.devices.disk.main.content.partitions;
+            loader = host.boot.loader;
+          in
+          passIf "disk-bios-boot-hybrid"
+            (host.system.build.toplevel ? drvPath
+              && partitions ? boot
+              && partitions.boot.type == "EF02"
+              && partitions.boot.size == "1M"
+              && loader.grub.enable
+              && loader.grub.efiSupport
+              && loader.grub.efiInstallAsRemovable
+              && loader.grub.devices == [ "/dev/disk/by-id/REPLACE-ME-example-disk" ]
+              && loader.grub.configurationLimit == 5
+              && !loader.systemd-boot.enable
+              && !loader.efi.canTouchEfiVariables)
+            "plexsphere.disk.biosBoot must add a 1M EF02 partition, install GRUB for BIOS and at the removable EFI path onto the disk disko names once, bound its generations, and turn systemd-boot and EFI variable writes off";
+
+        # Every machine installed by the live USB installer or the SSH
+        # takeover has the layout the default produces, and the next rebuild
+        # of one applies whatever the default has become. A default that
+        # drifted towards GRUB would swap the boot loader on those machines
+        # without anyone asking for it.
+        disk-bios-boot-default-unchanged =
+          let
+            host = (exampleHost "x86_64-linux").config;
+            loader = host.boot.loader;
+          in
+          passIf "disk-bios-boot-default-unchanged"
+            (!(host.disko.devices.disk.main.content.partitions ? boot)
+              && loader.systemd-boot.enable
+              && !loader.grub.enable
+              && loader.efi.canTouchEfiVariables)
+            "without plexsphere.disk.biosBoot the disk layout must keep systemd-boot, no BIOS boot partition, no GRUB and EFI variable writes";
+
+        # aarch64 has no BIOS, and install-grub.pl dies on a non-nodev device
+        # there because the aarch64 GRUB package has no i386-pc target. The
+        # assertion turns that build-time failure into an evaluation error
+        # that names the option.
+        disk-bios-boot-rejected-on-aarch64 = passIf "disk-bios-boot-rejected-on-aarch64"
+          (assertionFired
+            ((exampleHost "aarch64-linux").extendModules {
+              modules = [ { plexsphere.disk.biosBoot = true; } ];
+            })
+            "biosBoot")
+          "plexsphere.disk.biosBoot must fail an assertion on an aarch64 node";
+
         # Evaluated, never deployed. As nixosConfigurations entries these
         # would be one `nixos-rebuild switch --flake …#example-x86_64` away
         # from installing a source-controlled root key on a real machine and
