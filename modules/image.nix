@@ -87,6 +87,11 @@ in
   services.cloud-init.network.enable = true;
   networking.useNetworkd = true;
 
+  # nixpkgs' cloud-init module runs the command from its units only, so
+  # without this `cloud-init status --wait`, which the README tells an
+  # operator to run first, is not found on the node.
+  environment.systemPackages = [ pkgs.cloud-init ];
+
   # cloud-init.service writes the host name, root's keys and the user-data's
   # write_files, and cloud-final.service runs its runcmd. k3s and plexd
   # otherwise start at network-online.target, the same point cloud-init
