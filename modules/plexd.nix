@@ -59,6 +59,23 @@ in
         (cfg.settings.wireguard.listen_port or 51820)
       ];
 
+      # Remote sessions from the control plane arrive over the mesh: plexd
+      # binds each session's listener to the node's mesh IP on a port the
+      # kernel picks, so the whole of the kernel's default ephemeral range
+      # (net.ipv4.ip_local_port_range, 32768-60999) has to be open. Only on
+      # the WireGuard interface, which follows interface_name: plexd's own
+      # nftables chain hooks forward and never filters traffic addressed to
+      # the host, so this rule is what keeps the range off every other
+      # network. Within the mesh it is wide open. The session forward is
+      # unauthenticated (the first peer to connect takes the session), and
+      # any other socket bound to an ephemeral port on the mesh IP or the
+      # wildcard address answers every peer too. Not tied to tunnel.enabled:
+      # plexd forces that back on unless max_sessions is also set, so a
+      # condition here would disagree with the binary.
+      networking.firewall.interfaces.${cfg.settings.wireguard.interface_name or "plexd0"}.allowedTCPPortRanges = [
+        { from = 32768; to = 60999; }
+      ];
+
       # The same directory holds the out-of-band bootstrap token and
       # environment file; NixOS would otherwise create it world-readable.
       systemd.tmpfiles.settings."10-plexd"."/etc/plexd".d = {

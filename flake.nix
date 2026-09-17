@@ -289,6 +289,30 @@
             ]).config.networking.firewall.allowedUDPPorts)
           "plexd's WireGuard port must be open and follow services.plexd.settings.wireguard.listen_port";
 
+        # Session listeners bind the mesh IP on an ephemeral port, so the
+        # range has to be open on the WireGuard interface. Open anywhere
+        # else, or with the interface trusted outright, it would hand those
+        # ports, or every port, to networks that are not the mesh.
+        plexd-session-ports-open =
+          let
+            sessionRange = { from = 32768; to = 60999; };
+            opensOn = host: iface:
+              lib.elem sessionRange (host.config.networking.firewall.interfaces.${iface}.allowedTCPPortRanges or [ ]);
+            firewall = defaultNode.config.networking.firewall;
+            renamed = evalNode [
+              hostName
+              sshKey
+              { services.plexd.settings.wireguard.interface_name = "mesh0"; }
+            ];
+          in
+          passIf "plexd-session-ports-open"
+            (opensOn defaultNode "plexd0"
+              && !(lib.elem sessionRange firewall.allowedTCPPortRanges)
+              && !(lib.elem "plexd0" firewall.trustedInterfaces)
+              && opensOn renamed "mesh0"
+              && !(opensOn renamed "plexd0"))
+            "plexd's session port range must be open on the WireGuard interface only, follow services.plexd.settings.wireguard.interface_name, and leave that interface untrusted";
+
         # The README promises a host-level api.base_url beats the preset.
         plexd-settings-override =
           let
