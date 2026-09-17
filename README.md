@@ -1,272 +1,55 @@
 # plexsphere-node
 
-NixOS-based provisioning toolkit for Plexsphere nodes. A Nix flake takes a machine from bare metal to a fully configured Plexsphere node in one step — modeled on [plexsphere/nixos-k3s](https://github.com/plexsphere/nixos-k3s).
+A Nix flake that turns a machine into a Plexsphere node: from bare metal, from a running Linux over SSH, from a prebuilt disk image, or from an existing NixOS configuration. Every path ends in the same node:
 
-> **Status:** the shared base configuration ([#2](https://github.com/plexsphere/plexsphere-node/issues/2)) and all three provisioning paths are implemented: the live USB installer ([#4](https://github.com/plexsphere/plexsphere-node/issues/4)), the SSH takeover ([#3](https://github.com/plexsphere/plexsphere-node/issues/3)) and the machine image ([#5](https://github.com/plexsphere/plexsphere-node/issues/5)). See the [open issues](https://github.com/plexsphere/plexsphere-node/issues) for the roadmap.
-
-## What a finished node looks like
-
-Every provisioning path converges on the same target state:
-
-- **k3s** enabled by default
-- **plexd** running as a systemd service directly on the host (not as a k3s workload), consumed as the prebuilt Go binary released from [plexsphere/plexd](https://github.com/plexsphere/plexd) — it connects the node to the Plexsphere control plane
-- Declarative disk layout, initial network configuration, and host identity (hostname, SSH keys)
-- Supported architectures: **x86_64** and **aarch64**
+- **k3s**, enabled as a single-node server
+- **plexd** as a systemd service on the host (not a k3s workload), running the prebuilt release binary from [plexsphere/plexd](https://github.com/plexsphere/plexd); it connects the node to the Plexsphere control plane
+- a declarative disk layout, network configuration and host identity (host name, root SSH keys)
+- **x86_64** and **aarch64**
 
 ## Provisioning paths
 
-| Path | Use case | Issue |
-|---|---|---|
-| **SSH takeover** | Convert an existing SSH-reachable Linux machine in place, in the style of nixos-anywhere | [#3](https://github.com/plexsphere/plexsphere-node/issues/3) |
-| **Live USB installer** | Install onto local hardware with no usable operating system | [#4](https://github.com/plexsphere/plexsphere-node/issues/4) |
-| **Machine image** | Prebuilt bootable disk image for virtualized and cloud platforms (e.g. OpenStack), with cloud-init first-boot configuration | [#5](https://github.com/plexsphere/plexsphere-node/issues/5) |
+| Path | Use it for |
+|---|---|
+| [Machine image](#machine-image) | VMs: local tests with KVM (QEMU or libvirt), OpenStack and other clouds. Ready-made qcow2, configured by cloud-init at first boot |
+| [SSH takeover](#ssh-takeover) | Converting a machine that runs Linux and answers SSH, with nixos-anywhere |
+| [Live USB installer](#live-usb-installer) | Installing onto local hardware with no usable operating system |
+| [Existing NixOS machine](#existing-nixos-machine) | Adding the node profile to a NixOS configuration you already have |
 
-All three paths build on a **shared base configuration** ([#2](https://github.com/plexsphere/plexsphere-node/issues/2)) that lives in this repository: a Nix flake exporting `nixosModules.node` and `nixosModules.disk`, which describe the complete node target state. Applying `nixosModules.node` directly converts an existing NixOS machine into a Plexsphere node.
+The [node reference](#node-reference) covers the options, the firewall, the bootstrap token and upgrading plexd.
 
-## Use on an existing NixOS machine
+## Machine image
 
-Add this repository as a flake input:
+A qcow2 disk image of the node. It carries no identity of its own: every instance gets its host name, root's SSH keys, its network configuration and the plexd bootstrap token from cloud-init at first boot.
 
-```nix
-inputs.plexsphere-node.url = "github:plexsphere/plexsphere-node";
-```
+### Download
 
-Import `plexsphere-node.nixosModules.node` into the host configuration, name the node, and authorize at least one root SSH key:
-
-```nix
-{
-  imports = [ plexsphere-node.nixosModules.node ];
-
-  plexsphere.node.hostName = "plex-node-01";
-
-  plexsphere.node.sshAuthorizedKeys = [
-    "ssh-ed25519 AAAA... you@host"
-  ];
-}
-```
-
-The node profile enables k3s (single-node `server` role) and plexd by default.
-
-The NixOS firewall stays on. plexd's nftables table hooks `forward`: it enforces mesh peer policy on packets routed between peers and never filters traffic addressed to the host, so it is not a host packet filter and does not compete with one. Enabling plexd opens its WireGuard port (`services.plexd.settings.wireguard.listen_port`, default `51820/udp`) so peers can hand shake in; plexd's bridge features (relay, user access, site-to-site) are off by default and need their own ports opened when enabled. Enabling plexd also opens TCP `32768-60999`, the kernel's default ephemeral range, on its WireGuard interface (`services.plexd.settings.wireguard.interface_name`, default `plexd0`): a remote session from the control plane gets a listener on the node's mesh IP at a port the kernel picks. That range is open to every mesh peer. The session forward is unauthenticated, so the first peer to connect takes the session, and any other service listening on an ephemeral port on the mesh IP or on `0.0.0.0` answers every peer as well. A host that changes `net.ipv4.ip_local_port_range` has to open its own range to match. plexd's health listener (`/healthz`, `/readyz`) binds `127.0.0.1:9101` and is not opened: its endpoints are unauthenticated, and nothing off the host needs them. On the CNI devices (`cni0`, `flannel.1`) the profile opens the two ports pods need on the host: `6443` (apiserver) and `10250` (kubelet). It deliberately does not mark those devices trusted — a trusted interface accepts every port, which would expose sshd and anything else bound to `0.0.0.0` to every pod on the node. A workload that needs another host port needs it added here.
-
-Nothing else is opened — a single-node server needs none of it. Joining further nodes means opening the cluster ports deliberately, on the interface facing the other nodes:
-
-```nix
-networking.firewall.interfaces.eth0 = {
-  allowedTCPPorts = [ 6443 10250 ];   # apiserver, kubelet metrics
-  allowedUDPPorts = [ 8472 ];         # Flannel VXLAN
-};
-```
-
-Flannel VXLAN is unauthenticated: anything that can send to `8472/udp` can inject frames onto the pod overlay, past every NetworkPolicy. Never open it to an untrusted network.
-
-Importing only `nixosModules.node` never touches the machine's disk layout, `fileSystems`, or boot loader — from-scratch installs (the provisioning paths) additionally compose `nixosModules.disk`, which carries the disko GPT/ESP/ext4 layout and systemd-boot, or GRUB in hybrid BIOS/UEFI mode with `plexsphere.disk.biosBoot`.
-
-### Secrets encryption on an already-running server
-
-The profile passes `--secrets-encryption` to k3s servers. On a machine that was already running k3s, that flag encrypts **newly written** Secrets only — everything already in the datastore stays in plain text until it is rewritten. After the first rebuild, re-encrypt once:
+CI builds the x86_64 image on every push to `main` and publishes it to `https://get.plexsphere.com/node/`, replacing the previous one:
 
 ```bash
-k3s secrets-encrypt reencrypt --force
-systemctl restart k3s
+curl -fLO https://get.plexsphere.com/node/plexsphere-node-image-x86_64-linux.qcow2
+curl -fLO https://get.plexsphere.com/node/plexsphere-node-image-x86_64-linux.qcow2.sha256
+sha256sum -c plexsphere-node-image-x86_64-linux.qcow2.sha256
 ```
 
-The flag bounds a leak of the datastore alone, such as a copied database file or a backup that excludes the credential directory. It is not protection against offline access to the disk: k3s stores the AES key in `/var/lib/rancher/k3s/server/cred/encryption-config.json` on the same unencrypted root filesystem, so a stolen or snapshotted drive yields the ciphertext and the key together. Full-disk encryption is the control for that threat and this repository does not configure it.
+The checksum is served from the same host as the image, so it catches a broken download, not a tampered server. There is no published aarch64 image; build it yourself.
 
-## Install from a live USB stick
-
-The live installer is a bootable NixOS medium carrying `plexsphere-install`, an interactive script that collects a node's identity on the console and installs a complete Plexsphere node onto a local disk. Use it on hardware with no usable operating system.
-
-### Build the image
-
-```bash
-nix build .#packages.x86_64-linux.installer-iso
-```
-
-The image lands at `result/iso/plexsphere-node-installer-x86_64-linux.iso`. For an aarch64 machine build `.#packages.aarch64-linux.installer-iso`, which needs an aarch64 builder — an image is mastered on the architecture it boots.
-
-Build from a clean checkout. The medium carries this flake's own source as a store path, and for a dirty working tree Nix copies every file the checkout holds that `.gitignore` does not exclude — untracked ones included. A `kubeconfig`, a token dump or an `.envrc` left lying in the directory is therefore written into the world-readable Nix store of the image, onto every stick burnt from it and into the store of every node installed from those. That an image built this way also installs nodes from uncommitted sources is the smaller half of it. Check `git status` before you build, or build the committed `HEAD` and leave the working tree out of it:
-
-```bash
-nix build "git+file://$PWD?ref=HEAD#packages.x86_64-linux.installer-iso"
-```
-
-### Write the stick
-
-`dd` overwrites the target device completely and asks nothing. Name the stick, never one of the machine's disks:
-
-```bash
-sudo dd if=result/iso/plexsphere-node-installer-x86_64-linux.iso of=/dev/sdX bs=4M status=progress oflag=sync
-```
-
-`oflag=sync` keeps `dd` from returning while the write is still in the page cache, so the stick is safe to unplug once the command exits.
-
-### What the target machine needs
-
-**UEFI.** Boot the medium in UEFI mode. The installer refuses to run on a machine booted in legacy BIOS mode, because the Plexsphere disk layout installs systemd-boot onto an ESP and a BIOS boot offers neither EFI variables nor firmware that reads them. The same medium boots both ways, so this costs a firmware setting and a re-boot — the same mismatch caught later, at the bootloader step, costs a disk that has already been repartitioned.
-
-**A network.** The image is generic and carries no node closure: the installer downloads it during the install. The machine needs DHCP and a route to three hosts — `cache.nixos.org`, which serves the node closure, and `api.github.com` with `codeload.github.com`, which between them serve the flake inputs the install target evaluates against (`nixpkgs` and `disko`, at the revisions this repository's `flake.lock` pins; the medium carries neither source tree). Those two and not `github.com`: both revisions are pinned, so Nix resolves no ref and asks only for the tarball of each input, which its `github` fetcher addresses to `api.github.com` and which answers with a redirect to `codeload.github.com`. The installer probes all three before the first prompt rather than after the disk is gone. `nmtui` is on the medium for anything DHCP does not solve. `PLEXSPHERE_INSTALL_SKIP_NETWORK_CHECK=1` skips that pre-flight reachability probe and nothing else — it is for an operator whose own infrastructure serves all three. It does not make the install work offline. `sudo` resets the environment, so set it on the `sudo` command line rather than in front of it:
-
-```bash
-sudo PLEXSPHERE_INSTALL_SKIP_NETWORK_CHECK=1 plexsphere-install
-```
-
-**At least 4.6 GiB of RAM.** The live medium keeps the writable half of its Nix store on `/nix/.rw-store`, which nixpkgs' `iso-image.nix` mounts as a tmpfs with no `size=` option — so the kernel default applies and that store can grow to half the machine's RAM and no further. `disko-install` realises the whole node closure there before copying it to the target disk, and the node closure measures **1.8 GiB** (`nix path-info -Sh` over an installed system, at the nixpkgs pinned in `flake.lock`). Fitting 1.8 GiB into a tmpfs that stops at half of RAM takes 3.6 GiB, plus about 1 GiB for the running system: **4.6 GiB**. Redo that arithmetic when the closure grows.
-
-### Run the installer
-
-The medium logs a console in automatically as the unprivileged `nixos` user, and its help line names the command:
-
-```bash
-sudo plexsphere-install
-```
-
-It asks six questions, in this order:
-
-1. **Disk to install onto.** One of the disks it lists. The list holds whole disks only, and a partition is rejected: applying the layout to a partition would repartition it in place and leave a machine that does not boot. The stick the installer is running from is left out of the list — to `lsblk` it is a disk like any other, and wiping it would destroy the running installer along with the target. Your answer is resolved to a stable `/dev/disk/by-id` alias, and a disk that has none is refused: a kernel name such as `/dev/sda` is assigned in probe order, so it can come to mean a different disk between this prompt and the partition table being rewritten five prompts later — and the next boot after that is the installed node's. Only aliases naming the hardware count — `ata-`, `nvme-`, `scsi-`, `usb-`, `virtio-`, `mmc-`, and `wwn-` as a last resort. The ones udev derives from what is written on the disk, such as the `lvm-pv-uuid-…` link a whole-disk physical volume gets, are not identifiers of a disk and do not survive the wipe they would be pointed at. A virtual disk typically has no alias until its definition carries a serial, so give it one in the hypervisor and run the installer again. The resolved alias is then checked against the live medium a second time, because the exclusion behind the list ran against the kernel names the disks held while the list was printed: if a re-enumeration while you were reading it made the name you typed mean the stick, the installer stops instead of wiping itself.
-2. **Host name.** Must match `^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`. k3s derives the Kubernetes node name from it, so it has to survive as a DNS label.
-3. **Root SSH keys.** A GitHub username, expanded to `https://github.com/<user>.keys`, or a full `https://` URL. The fetch stays on HTTPS across redirects, so a key server answering with a plain-HTTP `Location` is refused rather than followed. The keys are fetched, their fingerprints printed, and you authorize them by typing `yes` — a key is never typed or pasted at this prompt, because a mistyped 68-character paste is the likeliest way to end up with a node nobody can log into. Every line of the fetched file must parse as an OpenSSH public key of a type `plexsphere.node.sshAuthorizedKeys` accepts; one bad line rejects the whole response, since a file that is partly unreadable is a file nobody vouched for.
-4. **Root password.** Optional, entered twice and never echoed. It is a console credential only — SSH stays key-only, so it cannot log in over the network — and it buys a way in when the network or k3s is broken. Blank leaves root without a password.
-5. **plexd bootstrap token.** Optional; blank skips it, and it is not echoed — it is a node-registration credential. See [Bootstrap token](#bootstrap-token) for what it is.
-6. **Control-plane URL.** Optional; blank keeps `https://api.plexsphere.com`. An answer must be a full `https://` URL: plexd presents the bootstrap token to this endpoint on every start.
-
-The installer then prints back everything it collected and asks you to type `yes`. That is the point of no return: the next thing that happens rewrites the partition table of the target disk and destroys everything on it. Anything other than `yes` aborts with the disk untouched. When the install succeeds, the machine offers a reboot.
-
-Two of your answers become files on the installed node, both `0600 root:root` and both outside the Nix store, which is world-readable: the bootstrap token at `/etc/plexd/bootstrap-token`, and the root password hash at `/etc/plexsphere/root-password-hash`.
-
-## Take over a machine over SSH
-
-The SSH takeover turns a machine that already runs Linux and answers SSH into a Plexsphere node, driven from your own machine. It uses [nixos-anywhere](https://github.com/nix-community/nixos-anywhere), which switches the running system into a NixOS installer held in RAM with kexec, partitions the disk with the layout of `nixosModules.disk`, installs the node, and reboots into it. The node is the same one the live USB installer produces.
-
-You run nixos-anywhere against a small host flake this repository ships as a template. The flake holds the three values that belong to one machine: its host name, its root SSH keys and its disk. Keep the directory afterwards, because it is also how the node is changed later.
-
-### What the target machine needs
-
-**Linux with kexec.** An x86_64 or aarch64 Linux whose kernel supports kexec, with at least 1.5 GB of RAM not counting swap, since the installer runs from memory. A container is not a target: kexec has to replace the kernel, and a container does not own one. The machine also needs `tar`, `cpio` and a `setsid` that supports `--wait`; nixos-anywhere checks for all three and stops when one is missing.
-
-**Root over SSH.** Log in as `root`, or as a user with password-less `sudo`. nixos-anywhere uploads a temporary key for the run and asks for the password when your own key is not accepted.
-
-**UEFI.** The disk layout installs systemd-boot onto an EFI system partition, and nothing in the takeover checks the firmware mode: a machine booted in legacy BIOS mode ends up with a wiped disk and a node that does not boot. Check before you start:
-
-```bash
-ssh root@<address> 'test -d /sys/firmware/efi && echo UEFI || echo BIOS'
-```
-
-**A route to GitHub and the Nix binary cache.** The target downloads the kexec image from GitHub releases itself when it has `wget` or `curl`; otherwise your machine downloads the image and uploads it. With `--build-on remote`, which the command below uses, the target also builds the node: it downloads the plexd release binary from GitHub releases and substitutes the rest of the closure from `cache.nixos.org`.
-
-### What your machine needs
-
-Nix with the `nix-command` and `flakes` experimental features enabled, on Linux or macOS, and an SSH key the target accepts. nixos-anywhere needs no installation, since `nix run` fetches it.
-
-### Create the host flake
-
-```bash
-mkdir plex-node-01 && cd plex-node-01
-nix flake init -t github:plexsphere/plexsphere-node#node
-```
-
-This writes `flake.nix` and `node.nix`. `flake.nix` composes `nixosModules.disk` and `nixosModules.node` with your `node.nix` into two configurations, `node-x86_64` and `node-aarch64`; use the one that matches what `uname -m` prints on the target. If you keep the directory in git, `git add` both files before evaluating it, because Nix reads only the files git tracks.
-
-### Fill in `node.nix`
-
-Three values have to be yours:
-
-1. **`plexsphere.node.hostName`** must match `^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$` and be unique across the cluster, because k3s derives the Kubernetes node name from it.
-2. **`plexsphere.node.sshAuthorizedKeys`** takes root's SSH keys in `ssh-keygen` form. It ships empty, and evaluation fails until it holds at least one key, and whenever a key is truncated or mistyped: password authentication is off, and sshd would skip a broken line without a word.
-3. **`plexsphere.disk.device`** names the disk the takeover wipes, as an alias under `/dev/disk/by-id`. List the aliases on the target:
-
-   ```bash
-   ssh root@<address> ls -l /dev/disk/by-id
-   ```
-
-   Take one that names the hardware: `ata-`, `nvme-`, `scsi-`, `usb-`, `virtio-` or `mmc-`, and `wwn-` only when there is no other. Aliases derived from what is written on the disk, such as `lvm-pv-uuid-`, `md-` or `dm-`, disappear when the disk is wiped. A kernel name such as `/dev/sda` is assigned in probe order, and the kexec boots a new kernel between your reading the name and the partitioning, so by then it can name a different disk. A virtual disk typically has no alias until its definition carries a serial, so give it one in the hypervisor.
-
-The two commented lines are optional. `plexsphere.node.hashedPasswordFile` enables a console root password, delivered in the next step. `services.plexd.settings.api.base_url` points plexd at a control plane other than `https://api.plexsphere.com`. Leave `system.stateVersion` as it is.
-
-### Deliver the bootstrap token and a root password
-
-Both are optional, and both reach the node as files kept out of the flake: Nix copies a flake's files into the world-readable Nix store when it evaluates it, so a credential in `node.nix`, or in any file next to it, can end up there. nixos-anywhere's `--extra-files <dir>` copies a directory onto the node's root filesystem before the install, keeping file modes and making root the owner. Build that directory outside the flake directory:
-
-```bash
-extra=$(mktemp -d)
-mkdir -p "$extra/etc/plexd" "$extra/etc/plexsphere"
-(umask 077; printf '%s\n' "$PLEXD_BOOTSTRAP_TOKEN" > "$extra/etc/plexd/bootstrap-token")
-(umask 077; nix run nixpkgs#mkpasswd -- --method=yescrypt > "$extra/etc/plexsphere/root-password-hash")
-```
-
-The third line writes the token from `PLEXD_BOOTSTRAP_TOKEN` to where plexd reads it (see [Bootstrap token](#bootstrap-token)). The fourth prompts for the root password and writes its hash. Uncomment `plexsphere.node.hashedPasswordFile` in `node.nix` exactly when you keep that line. The password logs in at the machine's console only, since SSH stays key-only. Drop either line to skip that file, and drop `--extra-files` from the command below when you skip both.
-
-### Check the configuration before the run
-
-```bash
-nix eval --raw .#nixosConfigurations.node-x86_64.config.system.build.toplevel.drvPath
-```
-
-This evaluates the whole node on your machine, module assertions included, and prints a derivation path when nothing is wrong. Run it before every takeover. With `--build-on remote`, nixos-anywhere partitions the disk before it builds the node, and building the node is where a missing key or a mistyped option fails, so without this step such a mistake surfaces on a disk that is already wiped.
-
-### Run the takeover
-
-```bash
-nix run github:nix-community/nixos-anywhere -- \
-  --flake .#node-x86_64 \
-  --generate-hardware-config nixos-generate-config ./hardware-configuration.nix \
-  --build-on remote \
-  --extra-files "$extra" \
-  --target-host root@<address>
-```
-
-- `--flake .#node-x86_64` installs the x86_64 configuration. Use `.#node-aarch64` for an ARM machine.
-- `--generate-hardware-config nixos-generate-config ./hardware-configuration.nix` runs `nixos-generate-config` on the target after the kexec and writes the result next to `node.nix`, where `flake.nix` imports it from then on. Keep the file. nixpkgs' default initrd modules carry no virtio driver, so without it a node in a virtio VM does not find its root disk, and on hardware it adds the storage controller modules and CPU microcode.
-- `--build-on remote` builds the node on the target. A macOS machine cannot build a Linux system without a Linux builder, so there the flag is required. On a Linux machine of the target's architecture you can drop it and build locally.
-- `--extra-files "$extra"` copies the token and the password hash from the previous step. Drop it when you built no such directory.
-- `--copy-host-keys`, when you add it, keeps the target's SSH host keys on the node. Without it the node generates new ones, and `ssh` warns that the remote host identification has changed until you run `ssh-keygen -R <address>`.
-
-nixos-anywhere prints each step as it goes: it uploads a temporary SSH key, switches the target into the installer with kexec, generates the hardware configuration, partitions and formats the disk, builds the node, copies the extra files, installs, and reboots into the node. From the kexec on, the target's old system is no longer running, and its disk stays untouched until the partitioning step.
-
-### When the takeover fails
-
-- **An error after the kexec**, such as a missing key or a mistyped option that the check above would have caught, leaves the target running the installer. The installer carried over the SSH keys authorized for `root` and for the `sudo` user, so `ssh root@<address>` still works. Fix `node.nix` and run the same command again: nixos-anywhere recognises the installer and continues without a second kexec. The disk may already be wiped by then.
-- **A disk alias that does not exist on the target** stops the run in the partitioning step, before anything is written. The unedited `REPLACE-ME` placeholder is such an alias. Correct it and run the command again.
-- **No route to GitHub** from a target with `wget` or `curl` stops the run while the kexec image downloads, and the target's own system keeps running.
-- **A machine without kexec support, or a container,** cannot be taken over. Install it from a [live USB stick](#install-from-a-live-usb-stick) instead.
-
-### Afterwards
-
-```bash
-ssh root@<address> systemctl is-active k3s plexd
-ssh root@<address> k3s kubectl get node
-```
-
-Keep the directory: `flake.nix`, `node.nix` and the generated `hardware-configuration.nix` describe the node. Change it later from a Linux machine with:
-
-```bash
-nixos-rebuild switch --flake .#node-x86_64 --target-host root@<address>
-```
-
-A node whose configuration lives in a flake of its own imports the node module instead, as [Use on an existing NixOS machine](#use-on-an-existing-nixos-machine) describes.
-
-## Boot a machine image
-
-The machine image is a prebuilt disk of the Plexsphere node for virtualized and cloud platforms. Boot it on OpenStack or in a local QEMU, and cloud-init gives the node its identity at first boot: the host name, root's SSH keys, the network configuration and the plexd bootstrap token. The node is the same one the live USB installer and the SSH takeover produce.
-
-### Build the image
+### Build it yourself
 
 ```bash
 nix build .#packages.x86_64-linux.image
 ```
 
-The image lands at `result/plexsphere-node-image-x86_64-linux.qcow2`, a compressed qcow2. For an aarch64 platform build `.#packages.aarch64-linux.image`, which needs an aarch64 builder.
+The image lands at `result/plexsphere-node-image-x86_64-linux.qcow2`. For aarch64 build `.#packages.aarch64-linux.image`. The build runs `nixos-install` in a QEMU VM, so it needs a Linux builder of the image's architecture with `/dev/kvm`; without it Nix refuses the build for the missing `kvm` system feature.
 
-The build runs `nixos-install` inside a QEMU VM, so it needs a Linux builder of the image's architecture with `/dev/kvm`. On a machine without `/dev/kvm`, Nix refuses the build because the `kvm` system feature is missing. A macOS machine cannot build the image without such a builder.
+### What is in the image
 
-### What the image contains
-
-The image holds the node of `nixosModules.disk` and `nixosModules.node`, with k3s and plexd enabled, and nothing that belongs to one machine: no host name, no root SSH key, no root password and no bootstrap token. Every instance booted from it gets those from cloud-init.
-
-- The x86_64 image boots from legacy BIOS firmware and from UEFI, because its disk carries a BIOS boot partition and GRUB in hybrid mode (`plexsphere.disk.biosBoot`). The aarch64 image boots from UEFI with systemd-boot.
-- The disk is 4 GB. On first boot the root partition and its ext4 file system grow to the size of the volume the instance gets.
-- The kernel and systemd log to the serial console, `ttyS0` on x86_64 and `ttyAMA0` on aarch64, which is where `openstack console log show` and QEMU's `-serial` read from. A login prompt runs there too.
-- cloud-init writes the network configuration the datasource provides as systemd-networkd units. Where the datasource provides none, every Ethernet interface falls back to DHCP.
+- k3s and plexd, enabled. No host name, no root SSH key, no root password, no bootstrap token.
+- A 4 GB disk. At first boot the root partition and its ext4 file system grow to fill the volume.
+- The x86_64 image boots from BIOS and UEFI (GRUB in hybrid mode, `plexsphere.disk.biosBoot`). The aarch64 image boots from UEFI with systemd-boot.
+- Kernel, systemd and a login prompt on the serial console: `ttyS0` on x86_64, `ttyAMA0` on aarch64.
+- cloud-init writes the datasource's network configuration as systemd-networkd units. Without one, every Ethernet interface uses DHCP.
+- k3s and plexd start after cloud-init has finished, so k3s registers under the host name from the user-data and plexd finds the token file.
 
 ### Write the user-data
 
@@ -288,46 +71,37 @@ write_files:
       PLEXD_API=https://cp.example.test
 ```
 
-- `hostname` must match `^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$` and be unique across the cluster, because k3s derives the Kubernetes node name from it. The name has to come from this key or from the platform: OpenStack sends the server name, and a NoCloud `meta-data` has to carry `local-hostname`. A node that gets neither comes up under systemd's fallback host name, `nixos`, and registers its k3s Node object under it.
-- `ssh_authorized_keys` go to `root`, the only account the image configures. Keys from the platform's keypair, which OpenStack hands to the instance as `public-keys` in its metadata, are added as well. The image carries no root password, so a node booted without any key, from the user-data or from the platform, has no way in at all. Boot a new instance with keys rather than trying to rescue it.
-- `/etc/plexd/bootstrap-token` is where plexd reads the token (see [Bootstrap token](#bootstrap-token)). plexd takes a token set directly in its configuration first, then this file, then `PLEXD_BOOTSTRAP_TOKEN`, and the image sets no token in its configuration.
-- `/etc/plexd/environment` carries `PLEXD_PROJECT_ID`, the UUID of the Plexsphere project the node registers into, and `PLEXD_RESOURCE_HANDLE`, the platform resource the node binds to. plexd refuses a fresh registration without either, exits with `project_id is required` or `resource_handle is required`, and is restarted every 5 seconds. `PLEXD_API` in the same file is optional and points plexd at a control plane other than `https://api.plexsphere.com`. plexd ranks environment variables above its configuration file, so the value overrides `api.base_url` of `/etc/plexd/config.yaml`, and a different control plane needs no rebuilt image.
+- **`hostname`** must match `^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$` and be unique across the cluster, because k3s derives the Kubernetes node name from it. OpenStack also sends the server name, and a NoCloud `meta-data` carries `local-hostname`. A node that gets no name at all comes up as `nixos`.
+- **`ssh_authorized_keys`** go to `root`, the only account. Keys from the platform, such as an OpenStack keypair, are added too. The image has no root password, so an instance booted without any key cannot be logged into; boot a new one.
+- **`/etc/plexd/bootstrap-token`** is where plexd reads the token (see [Bootstrap token](#bootstrap-token)).
+- **`/etc/plexd/environment`** sets `PLEXD_PROJECT_ID`, the UUID of the project the node registers into, and `PLEXD_RESOURCE_HANDLE`, the platform resource it binds to. Without either, plexd exits with `project_id is required` or `resource_handle is required` and restarts every 5 seconds. `PLEXD_API` is optional and points plexd at a control plane other than `https://api.plexsphere.com`.
 
-k3s and plexd wait for cloud-init to finish before they start, so k3s registers under the name from the user-data and plexd finds the token file in place.
-
-The user-data is readable for as long as the instance runs: on OpenStack the metadata service serves it, token included, to any process on the instance, pods included. The token is one-time, and plexd deletes the file once it has registered. To keep the token out of the user-data, leave its `write_files` entry out and write the file over SSH after the boot. A node without a token restarts plexd every 5 seconds until the file appears:
+The user-data stays readable while the instance runs; on OpenStack the metadata service hands it, token included, to any process on the instance, pods included. The token is one-time, and plexd deletes the file after registering. To keep the token out of the user-data, drop its `write_files` entry and write the file after the boot:
 
 ```bash
 ssh root@<address> 'umask 077; cat > /etc/plexd/bootstrap-token' <<< "$PLEXD_BOOTSTRAP_TOKEN"
 ```
 
-### Boot it on OpenStack
+### Boot it locally with KVM
 
-```bash
-openstack image create --disk-format qcow2 --container-format bare \
-  --file result/plexsphere-node-image-x86_64-linux.qcow2 plexsphere-node
-openstack server create --image plexsphere-node --flavor <flavor> --network <network> \
-  --key-name <keypair> --user-data user-data.yaml plex-node-01
-```
-
-The x86_64 image boots under the cloud's default firmware and with `--property hw_firmware_type=uefi` on the image alike, so set that property only when the cloud requires it. For the aarch64 image add `--property hw_architecture=aarch64` to `openstack image create`. The flavor's disk must be at least 4 GB.
-
-### Boot it in a local VM
-
-cloud-init's NoCloud datasource reads the user-data and a `meta-data` file from a seed image. Write the user-data above to `user-data`, and `meta-data` as:
+For local tests, boot the image on a Linux machine with KVM, either with QEMU directly or through libvirt. Both hand cloud-init the user-data on a NoCloud seed image. Save the user-data above as `user-data`, and write `meta-data`:
 
 ```yaml
 instance-id: plex-node-01
 local-hostname: plex-node-01
 ```
 
-Then build the seed, copy the image, and boot the copy:
+Both ways need the DMI serial number `ds=nocloud`. Without it cloud-init does not look at the seed, probes network metadata services for about four minutes and then gives up: the node boots as `nixos` with no key and no token.
+
+#### With QEMU
+
+Needs a user that can open `/dev/kvm`. Build the seed, give the instance its own copy of the image, and boot it:
 
 ```bash
 nix shell nixpkgs#cloud-utils -c cloud-localds seed.iso user-data meta-data
-install -m 0644 result/plexsphere-node-image-x86_64-linux.qcow2 plex-node-01.qcow2
-nix shell nixpkgs#qemu -c qemu-img resize plex-node-01.qcow2 10G
-nix shell nixpkgs#qemu -c qemu-system-x86_64 -machine accel=kvm:tcg -m 4G -smp 2 \
+cp plexsphere-node-image-x86_64-linux.qcow2 plex-node-01.qcow2
+nix shell nixpkgs#qemu -c qemu-img resize plex-node-01.qcow2 20G
+nix shell nixpkgs#qemu -c qemu-system-x86_64 -accel kvm -cpu host -m 4G -smp 2 \
   -drive if=virtio,file=plex-node-01.qcow2 \
   -cdrom seed.iso \
   -smbios type=1,serial=ds=nocloud \
@@ -335,14 +109,54 @@ nix shell nixpkgs#qemu -c qemu-system-x86_64 -machine accel=kvm:tcg -m 4G -smp 2
   -nographic
 ```
 
-- The copy is required: QEMU writes into the file it is given, and the image in the Nix store is read-only. `install -m 0644` makes the copy writable.
-- `qemu-img resize` gives the VM a larger disk, which the root file system grows into on first boot.
-- `-smbios type=1,serial=ds=nocloud` is required. The `cloud.cfg` nixpkgs generates names no datasource list, and cloud-init then runs NoCloud only when the kernel command line or the DMI serial number names it. Without it, cloud-init probes network metadata services for about four minutes and then falls back to no datasource at all: the node boots as `nixos` with no key and no token, and k3s, plexd and sshd start only once the probing has ended.
-- `-machine accel=kvm:tcg` uses KVM when your user can open `/dev/kvm`, and software emulation otherwise, which is many times slower.
+- The copy keeps the download untouched for the next instance. A self-built image has to be copied anyway, because the store path is read-only: `install -m 0644 result/plexsphere-node-image-x86_64-linux.qcow2 plex-node-01.qcow2`.
+- `-smbios type=1,serial=ds=nocloud` sets the serial number.
+- `-nographic` puts the serial console on your terminal. `Ctrl-a x` quits QEMU.
+- `cloud-localds` and `qemu` from your distribution work as well as the `nix shell` ones.
 
-Log in with `ssh -p 2222 root@localhost` once the boot is done.
+Log in with `ssh -p 2222 root@localhost`. For a second instance use a new copy of the image, a seed with a different `instance-id` and `local-hostname`, and a different host port.
 
-### Afterwards
+#### With libvirt
+
+Needs libvirt with its `default` network, `virt-install` 4.0 or later, and a user in the `libvirt` group. virt-install builds the seed image from `user-data` and `meta-data` itself:
+
+```bash
+export LIBVIRT_DEFAULT_URI=qemu:///system
+sudo install -m 0644 plexsphere-node-image-x86_64-linux.qcow2 /var/lib/libvirt/images/plex-node-01.qcow2
+sudo qemu-img resize /var/lib/libvirt/images/plex-node-01.qcow2 20G
+virt-install --name plex-node-01 --memory 4096 --vcpus 2 --cpu host-passthrough \
+  --import --disk /var/lib/libvirt/images/plex-node-01.qcow2,bus=virtio \
+  --osinfo linux2022 \
+  --cloud-init user-data=user-data,meta-data=meta-data \
+  --sysinfo system.serial=ds=nocloud \
+  --network network=default \
+  --graphics none --noautoconsole
+```
+
+- `--sysinfo system.serial=ds=nocloud` sets the serial number.
+- virt-install treats the first boot as an installation and removes the seed afterwards. The node keeps what cloud-init wrote, but the first reboot from inside the guest shuts the domain off instead of restarting it. Start it again with `virsh start plex-node-01`; later reboots behave normally.
+
+Find the address the node got from the `default` network, then log in:
+
+```bash
+virsh domifaddr plex-node-01
+ssh root@<address>
+```
+
+`virsh console plex-node-01` attaches to the serial console, and `Ctrl-]` detaches. `virsh destroy plex-node-01 && virsh undefine plex-node-01 --remove-all-storage` removes the instance with its disk.
+
+### Boot it on OpenStack
+
+```bash
+openstack image create --disk-format qcow2 --container-format bare \
+  --file plexsphere-node-image-x86_64-linux.qcow2 plexsphere-node
+openstack server create --image plexsphere-node --flavor <flavor> --network <network> \
+  --key-name <keypair> --user-data user-data.yaml plex-node-01
+```
+
+The x86_64 image boots under the cloud's default firmware and with `--property hw_firmware_type=uefi` alike, so set that property only when the cloud requires it. For the aarch64 image add `--property hw_architecture=aarch64`. The flavor's disk must be at least 4 GB. `openstack console log show plex-node-01` shows the serial console.
+
+### After the boot
 
 ```bash
 ssh root@<address> cloud-init status --wait
@@ -350,38 +164,231 @@ ssh root@<address> systemctl is-active k3s plexd
 ssh root@<address> k3s kubectl get node
 ```
 
-`cloud-init status --wait` returns once cloud-init has finished and prints `status: done`. To change a node booted from the image, build a new image and replace the instance: the image module is not exported, and the node has no host flake to rebuild from.
+`cloud-init status --wait` returns once cloud-init is done. A node booted from the image has no host flake to rebuild from: to change it, replace the instance with one booted from a new image.
 
-## Options
+## SSH takeover
+
+Turns a machine that runs Linux and answers SSH into a node, driven from your own machine. [nixos-anywhere](https://github.com/nix-community/nixos-anywhere) switches the target into a NixOS installer in RAM with kexec, partitions the disk, installs the node and reboots into it.
+
+### Requirements
+
+**The target** needs:
+
+- x86_64 or aarch64 Linux with kexec support and at least 1.5 GB of RAM without swap. Containers and machines without kexec cannot be taken over; use the [live USB installer](#live-usb-installer).
+- `tar`, `cpio` and a `setsid` that supports `--wait`.
+- SSH login as `root`, or as a user with password-less `sudo`.
+- **UEFI boot.** The layout installs systemd-boot, and nothing checks the firmware mode: a machine booted in BIOS mode ends up wiped and unbootable. Check first:
+
+  ```bash
+  ssh root@<address> 'test -d /sys/firmware/efi && echo UEFI || echo BIOS'
+  ```
+
+- Access to GitHub releases and `cache.nixos.org`.
+
+**Your machine** needs Nix with the `nix-command` and `flakes` features, on Linux or macOS, and an SSH key the target accepts.
+
+### Create the host flake
+
+```bash
+mkdir plex-node-01 && cd plex-node-01
+nix flake init -t github:plexsphere/plexsphere-node#node
+```
+
+This writes `flake.nix` and `node.nix`. The flake defines `node-x86_64` and `node-aarch64`; use the one matching `uname -m` on the target. In a git repository, `git add` both files, because Nix only reads tracked files.
+
+Edit `node.nix`:
+
+1. **`plexsphere.node.hostName`**: unique across the cluster, matching `^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`.
+2. **`plexsphere.node.sshAuthorizedKeys`**: at least one root SSH key. Evaluation fails while it is empty or a key is malformed.
+3. **`plexsphere.disk.device`**: the disk to wipe, as a `/dev/disk/by-id` alias. List them with `ssh root@<address> ls -l /dev/disk/by-id` and take one naming the hardware (`ata-`, `nvme-`, `scsi-`, `usb-`, `virtio-`, `mmc-`; `wwn-` only if there is no other). Not `/dev/sda`: the kexec boots a new kernel that may assign kernel names differently. Aliases such as `lvm-pv-uuid-`, `md-` or `dm-` vanish with the wipe. A virtual disk needs a serial in the hypervisor to get an alias.
+
+The two commented lines are optional: a console root password (next step) and a control plane other than `https://api.plexsphere.com`. Leave `system.stateVersion` unchanged.
+
+### Bootstrap token and root password
+
+Both are optional and reach the node as files, never through the flake, whose files Nix copies into the world-readable store. Build a directory for `--extra-files` outside the flake directory:
+
+```bash
+extra=$(mktemp -d)
+mkdir -p "$extra/etc/plexd" "$extra/etc/plexsphere"
+(umask 077; printf '%s\n' "$PLEXD_BOOTSTRAP_TOKEN" > "$extra/etc/plexd/bootstrap-token")
+(umask 077; nix run nixpkgs#mkpasswd -- --method=yescrypt > "$extra/etc/plexsphere/root-password-hash")
+```
+
+The last line prompts for the password. Keep it exactly when you uncomment `plexsphere.node.hashedPasswordFile` in `node.nix`. The password works on the console only; SSH stays key-only.
+
+### Check, then run
+
+Evaluate the node first. With `--build-on remote` the disk is partitioned before the node is built, so a mistake this command catches would otherwise show up on a wiped disk:
+
+```bash
+nix eval --raw .#nixosConfigurations.node-x86_64.config.system.build.toplevel.drvPath
+```
+
+```bash
+nix run github:nix-community/nixos-anywhere -- \
+  --flake .#node-x86_64 \
+  --generate-hardware-config nixos-generate-config ./hardware-configuration.nix \
+  --build-on remote \
+  --extra-files "$extra" \
+  --target-host root@<address>
+```
+
+- `--flake .#node-aarch64` for an ARM target.
+- `--generate-hardware-config` writes `hardware-configuration.nix` next to `node.nix`, which the flake imports. Keep it: it carries the storage drivers, virtio included, and the CPU microcode.
+- `--build-on remote` builds on the target. It is required on macOS; on a Linux machine of the target's architecture you can drop it.
+- `--extra-files "$extra"`: drop it when you created no files.
+- `--copy-host-keys` keeps the target's SSH host keys. Without it `ssh` warns about a changed host key until you run `ssh-keygen -R <address>`.
+
+If the run fails after the kexec, the target keeps running the installer and still accepts your SSH key: fix `node.nix` and run the same command again. The disk may already be wiped by then. A disk alias that does not exist, such as the unedited `REPLACE-ME`, stops the run before anything is written.
+
+### Afterwards
+
+```bash
+ssh root@<address> systemctl is-active k3s plexd
+ssh root@<address> k3s kubectl get node
+```
+
+Keep the directory; `flake.nix`, `node.nix` and `hardware-configuration.nix` describe the node. Apply changes from a Linux machine with:
+
+```bash
+nixos-rebuild switch --flake .#node-x86_64 --target-host root@<address>
+```
+
+## Live USB installer
+
+A bootable NixOS medium with `plexsphere-install`, which asks for the node's identity on the console and installs the node onto a local disk.
+
+### Build and write the stick
+
+```bash
+nix build "git+file://$PWD?ref=HEAD#packages.x86_64-linux.installer-iso"
+```
+
+Building the committed `HEAD` keeps untracked files, such as a kubeconfig lying in the checkout, out of the medium's world-readable Nix store. For aarch64 build `packages.aarch64-linux.installer-iso` on an aarch64 builder.
+
+`dd` overwrites the target device without asking. Name the stick, not one of your disks:
+
+```bash
+sudo dd if=result/iso/plexsphere-node-installer-x86_64-linux.iso of=/dev/sdX bs=4M status=progress oflag=sync
+```
+
+### Requirements
+
+- **UEFI boot.** The installer refuses to run when the medium was booted in BIOS mode.
+- **Network** with DHCP and access to `cache.nixos.org`, `api.github.com` and `codeload.github.com`: the node closure and the pinned flake inputs are downloaded during the install. The installer checks all three before the first question; `nmtui` is on the medium. `sudo PLEXSPHERE_INSTALL_SKIP_NETWORK_CHECK=1 plexsphere-install` skips that check, for networks that serve the three through their own infrastructure. It does not make an offline install possible.
+- **At least 4.6 GiB of RAM.** The medium's writable Nix store is a tmpfs capped at half the RAM, and the node closure (1.8 GiB) is realised there before it is copied to the disk.
+
+### Run the installer
+
+The console logs in as `nixos`. Start the installer:
+
+```bash
+sudo plexsphere-install
+```
+
+It asks:
+
+1. **Disk.** One of the whole disks it lists; the stick itself is not offered. The answer is resolved to a hardware `/dev/disk/by-id` alias, and a disk without one is refused. A virtual disk needs a serial in the hypervisor.
+2. **Host name**, matching `^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`.
+3. **Root SSH keys**, as a GitHub username (`https://github.com/<user>.keys`) or an `https://` URL. The fingerprints are shown and confirmed with `yes`.
+4. **Root password**, optional. Console only; SSH stays key-only.
+5. **plexd bootstrap token**, optional (see [Bootstrap token](#bootstrap-token)).
+6. **Control-plane URL**, optional; blank keeps `https://api.plexsphere.com`.
+
+It then shows the answers and waits for `yes`. That is the point of no return: the target disk is wiped. Anything else aborts with the disk untouched. After the install the machine offers a reboot. The token lands in `/etc/plexd/bootstrap-token`, the password hash in `/etc/plexsphere/root-password-hash`, both `0600 root:root`.
+
+## Existing NixOS machine
+
+Add the flake input:
+
+```nix
+inputs.plexsphere-node.url = "github:plexsphere/plexsphere-node";
+```
+
+Import the node module into the host configuration:
+
+```nix
+{
+  imports = [ plexsphere-node.nixosModules.node ];
+
+  plexsphere.node.hostName = "plex-node-01";
+
+  plexsphere.node.sshAuthorizedKeys = [
+    "ssh-ed25519 AAAA... you@host"
+  ];
+}
+```
+
+`nixosModules.node` leaves the disk layout, `fileSystems` and the boot loader alone. `nixosModules.disk`, which the other paths add, carries the disko layout (GPT, ESP, ext4) with systemd-boot, or hybrid BIOS/UEFI GRUB with `plexsphere.disk.biosBoot`.
+
+The profile passes `--secrets-encryption` to k3s. On a machine that already ran k3s, only Secrets written from then on are encrypted. Re-encrypt the existing ones once after the first rebuild:
+
+```bash
+k3s secrets-encrypt reencrypt --force
+systemctl restart k3s
+```
+
+This protects a leaked datastore, not a stolen disk: the key lives in `/var/lib/rancher/k3s/server/cred/encryption-config.json` on the same unencrypted root file system. This repository does not configure full-disk encryption.
+
+## Node reference
+
+### Options
 
 | Option | Type | Default | Description |
 |---|---|---|---|
-| `plexsphere.node.hostName` | str | none — required | Network host name of the node. k3s derives the Kubernetes node name from it, so it must be unique across the cluster. |
-| `plexsphere.node.sshAuthorizedKeys` | listOf str | `[ ]` | Root SSH keys in `ssh-keygen` form. Evaluation fails on an empty list or a malformed entry: password authentication is disabled and sshd skips a malformed key silently, so either mistake leaves the node unreachable. With `services.cloud-init.enable` the list may be empty, because cloud-init writes root's keys from the datasource at first boot; a malformed entry still fails. The key type and the blob length are both checked, so a truncated paste is caught as well; RSA below 2048 bits is rejected. Option prefixes (`restrict`, `command=`) are not accepted here — set those via `users.users.root.openssh.authorizedKeys.keys`. |
-| `plexsphere.node.hashedPasswordFile` | nullOr str | `null` | Path to a file holding the root password as a single `mkpasswd` hash, on one line. nixpkgs reads it on every system activation, so this is a plain filesystem path and never a store path — the hash stays out of the world-readable Nix store. The credential authenticates at the machine's console only, because the profile keeps `PasswordAuthentication = false`; it is no substitute for an SSH key, which stays mandatory. |
-| `plexsphere.disk.device` | str | none — required | Disk the disko layout is applied to (disk module only). Applying the layout destroys all data on it, so name it per host — preferably as a stable `/dev/disk/by-id/…` path, since `/dev/sdX` is assigned in probe order. |
-| `plexsphere.disk.biosBoot` | bool | `false` | Boot with GRUB in hybrid mode, from legacy BIOS and from UEFI, instead of with systemd-boot from UEFI only, adding a 1M BIOS boot partition in front of the ESP (disk module only, x86_64 only). The machine image sets it; the live USB installer and the SSH takeover stay on systemd-boot. |
-| `services.plexd.enable` | bool | `false` | Whether to run plexd (the node profile sets it to `true`). |
-| `services.plexd.package` | package | plexd v0.7.0 release binary | The plexd package to run. |
-| `services.plexd.settings` | YAML attrset | `{ api.base_url = "https://api.plexsphere.com"; }` | Freeform settings rendered to `/etc/plexd/config.yaml`; the preset `api.base_url` is a default, so any host-level value wins. The rendered file lands in the world-readable Nix store, so it must not carry credentials. |
+| `plexsphere.node.hostName` | str | required | Host name of the node. k3s derives the Kubernetes node name from it, so it must be unique across the cluster. |
+| `plexsphere.node.sshAuthorizedKeys` | listOf str | `[ ]` | Root SSH keys in `ssh-keygen` form. Evaluation fails on an empty list (unless `services.cloud-init.enable` is set) and on a malformed or truncated key, because password authentication is off. RSA keys need at least 2048 bits. Option prefixes (`restrict`, `command=`) belong in `users.users.root.openssh.authorizedKeys.keys`. |
+| `plexsphere.node.hashedPasswordFile` | nullOr str | `null` | Path to a file with a `mkpasswd` hash for root, read at activation and kept out of the Nix store. Console login only. |
+| `plexsphere.disk.device` | str | required | Disk the disko layout is applied to (disk module). Applying the layout wipes it; use a `/dev/disk/by-id/…` path. |
+| `plexsphere.disk.biosBoot` | bool | `false` | GRUB in hybrid BIOS/UEFI mode with a 1M BIOS boot partition, instead of UEFI-only systemd-boot (disk module, x86_64 only). The machine image sets it. |
+| `services.plexd.enable` | bool | `false` | Run plexd. The node profile sets it to `true`. |
+| `services.plexd.package` | package | plexd v0.7.0 release binary | The plexd package. |
+| `services.plexd.settings` | YAML attrset | `{ api.base_url = "https://api.plexsphere.com"; }` | Rendered to `/etc/plexd/config.yaml`; host values override the preset. The file is in the world-readable Nix store, so no credentials. |
 
-## Bootstrap token
+### Firewall
 
-plexd reads its registration bootstrap token from `/etc/plexd/bootstrap-token` (plexd's `registration.token_file` default) or from the `PLEXD_BOOTSTRAP_TOKEN` environment variable, which can be set via `/etc/plexd/environment` (picked up by the unit's optional `EnvironmentFile`).
+The NixOS firewall stays on. The node opens:
 
-Both files are node-registration credentials: write them as mode `0600`, owned by `root`. The module keeps `/etc/plexd` itself at `0750 root:root`, but the files an operator drops there inherit the current umask.
+| Port | Interface | For |
+|---|---|---|
+| `51820/udp` (`services.plexd.settings.wireguard.listen_port`) | all | WireGuard handshakes from mesh peers |
+| `32768-60999/tcp` | `plexd0` (`services.plexd.settings.wireguard.interface_name`) | remote sessions from the control plane |
+| `6443/tcp`, `10250/tcp` | `cni0`, `flannel.1` | apiserver and kubelet, for pods |
 
-This repository deliberately does not manage the token — delivery is out of band. On an existing machine the operator writes it directly; the live USB installer ([#4](https://github.com/plexsphere/plexsphere-node/issues/4)) prompts for it and writes it to `/etc/plexd/bootstrap-token` at `0600`; the SSH takeover ([#3](https://github.com/plexsphere/plexsphere-node/issues/3)) delivers it as a file through nixos-anywhere's `--extra-files` (see [Deliver the bootstrap token and a root password](#deliver-the-bootstrap-token-and-a-root-password)); and the machine image ([#5](https://github.com/plexsphere/plexsphere-node/issues/5)) delivers it through cloud-init `write_files` (see [Write the user-data](#write-the-user-data)).
+- The session range is the kernel's ephemeral port range and is open to every mesh peer. Session forwards are unauthenticated, so the first peer to connect takes a session, and any other service listening on an ephemeral port on the mesh IP or on `0.0.0.0` is reachable by every peer. A host that changes `net.ipv4.ip_local_port_range` has to open its own range.
+- The CNI interfaces are deliberately not trusted, which would expose sshd and everything else on `0.0.0.0` to every pod. Open further host ports for workloads explicitly.
+- plexd's nftables table only enforces mesh policy on forwarded traffic; it is no host packet filter. Its health endpoints (`/healthz`, `/readyz`) listen on `127.0.0.1:9101` and are not opened. The bridge features (relay, user access, site-to-site) are off by default and need their own ports when enabled.
 
-## Upgrading plexd
+A single-node server needs nothing more. To join further nodes, open the cluster ports on the interface facing them:
 
-Bump `version` in `packages/plexd.nix` and replace both SRI hashes with values converted from the new release's `checksums.sha256`:
+```nix
+networking.firewall.interfaces.eth0 = {
+  allowedTCPPorts = [ 6443 10250 ];   # apiserver, kubelet metrics
+  allowedUDPPorts = [ 8472 ];         # Flannel VXLAN
+};
+```
+
+Flannel VXLAN is unauthenticated: whoever reaches `8472/udp` can inject frames into the pod network, past every NetworkPolicy. Never open it to an untrusted network.
+
+### Bootstrap token
+
+plexd reads its registration token from `/etc/plexd/bootstrap-token`, or from `PLEXD_BOOTSTRAP_TOKEN`, which `/etc/plexd/environment` can set. Write both files as `0600 root:root`; `/etc/plexd` is `0750`, but new files follow the current umask. This repository never puts the token into the configuration. Each path delivers it out of band:
+
+- machine image: cloud-init `write_files` ([Write the user-data](#write-the-user-data))
+- SSH takeover: `--extra-files` ([Bootstrap token and root password](#bootstrap-token-and-root-password))
+- live USB installer: prompt
+- existing NixOS machine: write the file yourself
+
+### Upgrading plexd
+
+Bump `version` in `packages/plexd.nix` and replace both SRI hashes with the values from the release's `checksums.sha256`:
 
 ```bash
 nix hash convert --hash-algo sha256 --to sri <hex-digest>
 ```
 
-`checksums.sha256` is published on the same release page as the binaries, so it only proves the two agree with each other. CI additionally verifies the sigstore bundle shipped with each asset, which is what ties the bytes to the plexd release pipeline:
+The checksums come from the same release page as the binaries. CI additionally verifies each binary's sigstore bundle against plexd's release workflow:
 
 ```bash
 cosign verify-blob \
@@ -390,9 +397,3 @@ cosign verify-blob \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   --bundle plexd-linux-amd64.sigstore.json plexd-linux-amd64
 ```
-
-The identity is pinned down to the release workflow and the tag refs it runs on. Anchoring on the repository alone would accept a signature from any workflow on any branch or pull-request ref of `plexsphere/plexd`, which proves only that the bytes passed through that repository — not that they came from its release pipeline.
-
-## Why
-
-Attaching a small baremetal machine to Plexsphere for testing is currently manual and unreproducible. This repository makes test nodes disposable and identical: point the flake at a reachable machine — or boot a stick or an image — and get a ready-to-enroll node every time.
