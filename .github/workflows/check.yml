@@ -82,6 +82,12 @@ jobs:
 
   image:
     runs-on: ubuntu-latest
+    # Pushes to main publish the image to a fixed URL. Two of them building at
+    # once could finish their uploads out of order and leave the older image
+    # behind that URL, so they share one group and run one after the other.
+    # Every other run gets a group of its own and is not held back.
+    concurrency:
+      group: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'image-publish' || format('image-{0}', github.run_id) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       # disko's builder is nixpkgs' vmTools.runInLinuxVM, whose derivation
@@ -112,10 +118,12 @@ jobs:
       # service transfers, and no evaluation reveals it, so print it on every
       # run.
       - name: build x86_64 machine image
+        id: build
         run: |
           set -euo pipefail
           out=$(nix build --no-link --print-out-paths .#packages.x86_64-linux.image)
           du -h "$out"/*.qcow2
+          echo "out=$out" >> "$GITHUB_OUTPUT"
       # Only evaluated, not built: producing the aarch64 image needs an aarch64
       # builder, which an ubuntu-latest runner is not and emulation would not
       # make affordable. Evaluation still forces every module of the image, so
@@ -124,3 +132,71 @@ jobs:
       # into a disk image nothing in CI boots.
       - name: evaluate aarch64 machine image
         run: nix eval .#packages.aarch64-linux.image.drvPath
+      # A push to main publishes the x86_64 image to
+      # https://get.plexsphere.com/node/, next to a .sha256 file that
+      # sha256sum -c checks after a download. Pull requests never publish.
+      # The SFTP root is the web root, and the upload creates node/ when it is
+      # missing. The step reads four repository secrets:
+      #
+      #   SFTP_HOST         host name of the SFTP server
+      #   SFTP_USER         the dedicated upload user
+      #   SFTP_PASSWORD     that user's password
+      #   SFTP_KNOWN_HOSTS  the server's host key lines, as ssh-keyscan prints
+      #                     them; the host key is checked, never trusted on
+      #                     first use, since a server that only claims to be
+      #                     the host would receive the password
+      #
+      # sftp -b turns on BatchMode, which rules out password authentication.
+      # ssh keeps the first value it gets for an option, so -o BatchMode=no
+      # has to come before -b. The password reaches ssh through an askpass
+      # script that prints it from the environment, so it is never written to
+      # disk, and SSH_ASKPASS_REQUIRE=force makes ssh use that script without
+      # a terminal or a display.
+      #
+      # Both files are uploaded under a hidden .part name and renamed into
+      # place, so a download never reads a half-written image. The old file is
+      # removed before each rename because a plain SFTP rename does not
+      # replace an existing file. Leftover .part files of an aborted run are
+      # removed first: sftp carries the store's read-only mode over to the
+      # uploaded file, and a read-only .part could not be written again.
+      - name: publish x86_64 machine image
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          IMAGE_DIR: ${{ steps.build.outputs.out }}
+          SFTP_HOST: ${{ secrets.SFTP_HOST }}
+          SFTP_USER: ${{ secrets.SFTP_USER }}
+          SFTP_PASSWORD: ${{ secrets.SFTP_PASSWORD }}
+          SFTP_KNOWN_HOSTS: ${{ secrets.SFTP_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          for secret in SFTP_HOST SFTP_USER SFTP_PASSWORD SFTP_KNOWN_HOSTS; do
+            if [ -z "${!secret}" ]; then
+              echo "::error::the repository secret $secret is not set"
+              exit 1
+            fi
+          done
+          image=plexsphere-node-image-x86_64-linux.qcow2
+          cd "$RUNNER_TEMP"
+          cat > sftp_askpass <<'EOF'
+          #!/bin/sh
+          printf '%s\n' "$SFTP_PASSWORD"
+          EOF
+          chmod 700 sftp_askpass
+          printf '%s\n' "$SFTP_KNOWN_HOSTS" > sftp_known_hosts
+          (cd "$IMAGE_DIR" && sha256sum "$image") > "$image.sha256"
+          SSH_ASKPASS="$RUNNER_TEMP/sftp_askpass" SSH_ASKPASS_REQUIRE=force \
+          sftp -o BatchMode=no -b - \
+            -o PubkeyAuthentication=no \
+            -o PreferredAuthentications=password,keyboard-interactive \
+            -o UserKnownHostsFile=sftp_known_hosts -o StrictHostKeyChecking=yes \
+            "$SFTP_USER@$SFTP_HOST" <<EOF
+          -mkdir /node
+          -rm /node/.$image.part
+          -rm /node/.$image.sha256.part
+          put $IMAGE_DIR/$image /node/.$image.part
+          put $image.sha256 /node/.$image.sha256.part
+          -rm /node/$image
+          rename /node/.$image.part /node/$image
+          -rm /node/$image.sha256
+          rename /node/.$image.sha256.part /node/$image.sha256
+          EOF
