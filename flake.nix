@@ -120,6 +120,26 @@
         ];
       };
 
+      # The machine image: the node of nixosModules.disk and nixosModules.node,
+      # with cloud-init supplying the identity at first boot. Local and
+      # unexported for the reason the medium above is: modules/image.nix as
+      # a nixosModules entry would turn the host importing it into an image
+      # that hands its host name and root keys to whatever datasource it
+      # finds. nixosModules.disk imports disko's NixOS module, which is what
+      # provides system.build.diskoImages.
+      imageSystem = system: lib.nixosSystem {
+        inherit system;
+        modules = [
+          self.nixosModules.disk
+          self.nixosModules.node
+          ./modules/image.nix
+          { system.stateVersion = "26.05"; }
+        ];
+      };
+
+      # Evaluated once per system and shared by the package and the checks.
+      imageSystems = lib.genAttrs [ "x86_64-linux" "aarch64-linux" ] imageSystem;
+
       pkgs = nixpkgs.legacyPackages.x86_64-linux;
 
       # The checks below force single options instead of instantiating a
@@ -156,6 +176,8 @@
         plexsphere-install = plexsphereInstallFor system;
 
         installer-iso = (installerSystem system).config.system.build.isoImage;
+
+        image = imageSystems.${system}.config.system.build.diskoImages;
       });
 
       # Not the lib bound above — this is the flake output named lib, and the
@@ -741,6 +763,144 @@
             done
             touch $out
           '';
+
+        # CI builds the x86_64 image and only evaluates the aarch64 one, as it
+        # does for the installer medium, so evaluation is what both
+        # architectures share. diskoImages ? drvPath alone stops at the WHNF
+        # of the builder derivation and never reaches the system it installs;
+        # forcing the toplevel as well is what runs the module assertions.
+        image-evaluates = passIf "image-evaluates"
+          (lib.all
+            (system:
+              let image = imageSystems.${system}.config; in
+              image.system.build.toplevel ? drvPath
+              && image.system.build.diskoImages ? drvPath)
+            [ "x86_64-linux" "aarch64-linux" ])
+          "the machine image must evaluate on both architectures";
+
+        # One image boots every instance made from it, so whatever identity it
+        # carries, every one of those nodes shares: a host name puts them all
+        # on one k3s Node object, and a root key or password lets its holder
+        # into all of them. cloud-init supplies the identity at first boot.
+        image-carries-no-identity = passIf "image-carries-no-identity"
+          (lib.all
+            (system:
+              let image = imageSystems.${system}.config; in
+              image.networking.hostName == ""
+              && image.users.users.root.openssh.authorizedKeys.keys == [ ]
+              && image.users.users.root.hashedPasswordFile == null
+              && image.users.users.root.hashedPassword == null)
+            [ "x86_64-linux" "aarch64-linux" ])
+          "the machine image must carry no host name, no root SSH key and no root password";
+
+        # The ordering is what keeps k3s from registering its Node object under
+        # the host name from before cloud-init, and plexd from starting before
+        # /etc/plexd/bootstrap-token exists. A wants or requires in its place
+        # would be worse than none: when no datasource is found,
+        # cloud-final.service never starts, and a unit that depends on it
+        # would never start either.
+        image-waits-for-cloud-init = passIf "image-waits-for-cloud-init"
+          (lib.all
+            (system:
+              let
+                image = imageSystems.${system}.config;
+                pullsInCloudInit = lib.any (lib.hasPrefix "cloud-");
+              in
+              image.services.cloud-init.enable
+              && image.services.cloud-init.network.enable
+              && image.networking.useNetworkd
+              && lib.all
+                (name:
+                  let unit = image.systemd.services.${name}; in
+                  lib.elem "cloud-final.service" unit.after
+                  && !(pullsInCloudInit unit.wants)
+                  && !(pullsInCloudInit unit.requires))
+                [ "k3s" "plexd" ])
+            [ "x86_64-linux" "aarch64-linux" ])
+          "the machine image must enable cloud-init with networkd and order k3s and plexd after cloud-final.service without wanting or requiring any cloud-init unit";
+
+        # The image is 4G, and an instance gets the volume its flavor names.
+        # Without the growth the node runs on the image's 3G of root whatever
+        # the volume, until the container images k3s pulls fill it.
+        # autoResize is only supported on ext2/3/4, so the file system type is
+        # pinned with it.
+        image-grows-root = passIf "image-grows-root"
+          (lib.all
+            (system:
+              let image = imageSystems.${system}.config; in
+              image.boot.growPartition
+              && image.fileSystems."/".autoResize
+              && image.fileSystems."/".fsType == "ext4")
+            [ "x86_64-linux" "aarch64-linux" ])
+          "the machine image must grow its root partition and its ext4 file system on boot";
+
+        # nixpkgs' default initrd carries no virtio driver, and every OpenStack
+        # cloud and every local QEMU hands the image a virtio disk and NIC. The
+        # image that lacks them fails in stage 1 looking for its root device,
+        # which no evaluation or build reports.
+        image-boots-on-virtio = passIf "image-boots-on-virtio"
+          (lib.all
+            (system:
+              let modules = imageSystems.${system}.config.boot.initrd.availableKernelModules; in
+              lib.all (m: lib.elem m modules) [ "virtio_blk" "virtio_pci" "virtio_scsi" "virtio_net" ])
+            [ "x86_64-linux" "aarch64-linux" ])
+          "the machine image must carry the virtio block, PCI, SCSI and network drivers in its initrd";
+
+        # x86 clouds boot SeaBIOS unless the image says otherwise, so the
+        # x86_64 image boots from both firmwares, while aarch64 has UEFI only
+        # and GRUB there has no i386-pc target. Neither may write EFI
+        # variables, which an instance has no entry for and may not persist.
+        # The serial console differs per architecture and is where the
+        # platform's console log reads from.
+        image-boot-loader-per-architecture =
+          let
+            x86_64 = imageSystems.x86_64-linux.config;
+            aarch64 = imageSystems.aarch64-linux.config;
+          in
+          passIf "image-boot-loader-per-architecture"
+            (x86_64.plexsphere.disk.biosBoot
+              && x86_64.boot.loader.grub.enable
+              && x86_64.boot.loader.grub.efiInstallAsRemovable
+              && !x86_64.boot.loader.systemd-boot.enable
+              && !aarch64.plexsphere.disk.biosBoot
+              && aarch64.boot.loader.systemd-boot.enable
+              && !aarch64.boot.loader.grub.enable
+              && !x86_64.boot.loader.efi.canTouchEfiVariables
+              && !aarch64.boot.loader.efi.canTouchEfiVariables
+              && lib.elem "console=ttyS0,115200n8" x86_64.boot.kernelParams
+              && lib.elem "console=ttyAMA0,115200n8" aarch64.boot.kernelParams)
+            "the x86_64 image must boot with hybrid GRUB and the aarch64 image with systemd-boot, neither may touch EFI variables, and each must put a console on its architecture's serial port";
+
+        # The output file name is what the README and the CI job name, and
+        # disko derives it from imageName; the builder's derivation name
+        # defaults to one derived from the empty host name. The device has to
+        # stay a placeholder, because the builder substitutes /dev/vda for it
+        # and a real path here would read as the disk the image goes onto.
+        image-builder-settings = passIf "image-builder-settings"
+          (lib.all
+            (system:
+              let
+                image = imageSystems.${system}.config;
+                disk = image.disko.devices.disk.main;
+              in
+              lib.hasPrefix "/dev/disk/by-id/REPLACE-ME" disk.device
+              && disk.imageSize == "4G"
+              && disk.imageName == "plexsphere-node-image-${system}"
+              && image.disko.imageBuilder.name == "plexsphere-node-image-${system}"
+              && image.disko.imageBuilder.imageFormat == "raw"
+              && image.disko.memSize == 2048
+              && lib.hasInfix "qemu-img convert" image.disko.imageBuilder.extraPostVM)
+            [ "x86_64-linux" "aarch64-linux" ])
+          "the machine image must keep its placeholder device, a 4G plexsphere-node-image-<system> raw build converted to qcow2, and a 2048 MiB builder VM";
+
+        # The same coupling installer-target-state-version pins for the live
+        # USB path: a node booted from the image is a fresh install and
+        # declares the release of the nixpkgs it was built from, as a literal
+        # rather than config.system.nixos.release, which would move on the
+        # next bump.
+        image-state-version = passIf "image-state-version"
+          (imageSystems.x86_64-linux.config.system.stateVersion == lib.trivial.release)
+          "the machine image's system.stateVersion must equal the release of the pinned nixpkgs; a node booted from it is a fresh install";
       };
     };
 }
