@@ -41,6 +41,21 @@
         modules = [ self.nixosModules.disk self.nixosModules.node exampleModule ];
       };
 
+      # The operator's host flake from templates/node, evaluated with this
+      # checkout standing in for its github:plexsphere/plexsphere-node input.
+      # Importing the template's own flake.nix instead of restating what it
+      # composes is what lets a check here catch a module change that breaks
+      # the file an operator instantiates, and substituting self for the input
+      # keeps that check offline and pointed at the modules under review
+      # rather than at whatever the default branch holds.
+      takeoverHost = system: modules:
+        ((import ./templates/node/flake.nix).outputs {
+          inherit nixpkgs;
+          plexsphere-node = self;
+        }).nixosConfigurations."node-${lib.removeSuffix "-linux" system}".extendModules {
+          inherit modules;
+        };
+
       # What the live installer installs. Identity is deliberately absent:
       # plexsphere.node.hostName has no default, so a target throws until the
       # installer injects the identity it collected on the console, and
@@ -586,6 +601,36 @@
               && lib.hasInfix script.name medium.services.getty.helpLine)
             [ "x86_64-linux" "aarch64-linux" ])
           "the installer medium must ship plexsphere-install and name it on the console";
+
+        # The template ships with an empty key list, so this supplies one the
+        # way an operator's edit to node.nix would; every other value is the
+        # template's own. Forcing the toplevel runs the module assertions on
+        # both architectures, and stateVersion is held to the release of the
+        # nixpkgs the template follows, as installer-target-state-version holds
+        # it for the live USB path.
+        takeover-template-evaluates = passIf "takeover-template-evaluates"
+          (lib.all
+            (system:
+              let host = (takeoverHost system [ sshKey ]).config; in
+              host.system.build.toplevel ? drvPath
+              && host.networking.hostName == "plex-node-01"
+              && host.nixpkgs.hostPlatform.system == system
+              && host.disko.devices.disk.main.device == "/dev/disk/by-id/REPLACE-ME"
+              && host.users.users.root.openssh.authorizedKeys.keys == [ placeholderKey ]
+              && host.users.users.root.hashedPasswordFile == null
+              && host.system.stateVersion == lib.trivial.release)
+            [ "x86_64-linux" "aarch64-linux" ])
+          "the takeover template must evaluate on both architectures once a key is supplied, take its identity from node.nix, and declare the release of the pinned nixpkgs as its stateVersion";
+
+        # No key can ship in the template: a real one would be authorized on
+        # every node taken over with it, which is the reason placeholderKey
+        # stays out of every deployable output, and a visibly broken one would
+        # fail the same assertion with a less direct message. What has to hold
+        # instead is that an operator who never fills the list in gets the
+        # assertion rather than a node nobody can log into.
+        takeover-template-rejects-unedited-key = passIf "takeover-template-rejects-unedited-key"
+          (assertionFired (takeoverHost "x86_64-linux" [ ]) "sshAuthorizedKeys")
+          "the takeover template must fail the sshAuthorizedKeys assertion until the operator adds a key";
       };
     };
 }
