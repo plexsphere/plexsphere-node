@@ -153,6 +153,25 @@
       # attribute names below — the systems — are what the installer asks for.
       lib.installTargets = lib.genAttrs [ "x86_64-linux" "aarch64-linux" ] installTarget;
 
+      # The SSH takeover path. nixos-anywhere installs a nixosConfigurations
+      # entry, which this flake deliberately exports none of (see
+      # example-hosts-evaluate), and an entry that could install anything
+      # would carry a host name, root keys and a disk that belong to one
+      # machine rather than to this repository. So the entry lives in a flake
+      # the operator owns, and this template is where it comes from:
+      # nix flake init -t github:plexsphere/plexsphere-node#node. welcomeText
+      # is printed right after the files are written, which is when the
+      # operator has to learn that node.nix is theirs to fill in.
+      templates.node = {
+        path = ./templates/node;
+        description = "A Plexsphere node installed over SSH with nixos-anywhere";
+        welcomeText = ''
+          Edit node.nix: the host name, at least one root SSH key, and the disk to install onto.
+          Then run nixos-anywhere against the machine as described in
+          https://github.com/plexsphere/plexsphere-node#take-over-a-machine-over-ssh
+        '';
+      };
+
       checks.x86_64-linux = {
         # Both example hosts set a key, so without this check only the passing
         # branch of the assertion would ever be evaluated.
