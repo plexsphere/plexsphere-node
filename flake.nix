@@ -631,6 +631,38 @@
         takeover-template-rejects-unedited-key = passIf "takeover-template-rejects-unedited-key"
           (assertionFired (takeoverHost "x86_64-linux" [ ]) "sshAuthorizedKeys")
           "the takeover template must fail the sshAuthorizedKeys assertion until the operator adds a key";
+
+        # The two checks above substitute self for the template's
+        # plexsphere-node input, so its URL is the one string in the template
+        # that no evaluation here covers. The README commands are what an
+        # operator types, and nothing but agreement ties them to the template.
+        # Pin both sides, so a renamed configuration or a dropped flag fails
+        # here rather than on a machine whose disk nixos-anywhere has already
+        # partitioned. The --flake pattern carries the line continuation of
+        # the nixos-anywhere command, because the README passes the same
+        # --flake .#node-x86_64 to nixos-rebuild as well, and a bare pattern
+        # would keep passing when only the takeover command drifts.
+        takeover-docs-match-the-template =
+          pkgs.runCommand "takeover-docs-match-the-template" { } ''
+            for pattern in \
+                github:plexsphere/plexsphere-node \
+                nixosModules.disk \
+                nixosModules.node \
+                ./node.nix \
+                hardware-configuration.nix; do
+              grep -q -F -- "$pattern" ${./templates/node/flake.nix}
+            done
+            for pattern in \
+                'nix flake init -t github:plexsphere/plexsphere-node#node' \
+                '--flake .#node-x86_64 \' \
+                '--generate-hardware-config nixos-generate-config ./hardware-configuration.nix' \
+                '--build-on remote' \
+                '--extra-files' \
+                '--copy-host-keys'; do
+              grep -q -F -- "$pattern" ${./README.md}
+            done
+            touch $out
+          '';
       };
     };
 }
