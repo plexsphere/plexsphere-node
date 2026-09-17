@@ -57,6 +57,9 @@ in
         Must be non-empty and syntactically valid: password authentication is
         disabled, and sshd silently skips a malformed line, so either mistake
         leaves the node unreachable after rebuild.
+
+        With services.cloud-init.enable the list may be empty, because
+        cloud-init writes root's keys from the datasource at first boot.
       '';
     };
 
@@ -87,8 +90,11 @@ in
   config = {
     assertions = [
       {
-        assertion = cfg.sshAuthorizedKeys != [ ] && lib.all isPublicKey cfg.sshAuthorizedKeys;
-        message = "plexsphere.node.sshAuthorizedKeys must hold at least one syntactically valid OpenSSH public key ('<type> <base64> [comment]'). Password authentication is disabled on Plexsphere nodes and sshd skips a malformed key without failing, so an empty or mistyped list leaves the node unreachable after rebuild.";
+        # The validity half holds unconditionally: a malformed entry is
+        # skipped by sshd whether or not cloud-init adds keys of its own.
+        assertion = lib.all isPublicKey cfg.sshAuthorizedKeys
+          && (cfg.sshAuthorizedKeys != [ ] || config.services.cloud-init.enable);
+        message = "plexsphere.node.sshAuthorizedKeys must hold at least one syntactically valid OpenSSH public key ('<type> <base64> [comment]'). Password authentication is disabled on Plexsphere nodes and sshd skips a malformed key without failing, so an empty or mistyped list leaves the node unreachable after rebuild. With services.cloud-init.enable the list may be empty, because cloud-init writes root's keys from the datasource at first boot.";
       }
     ];
 
