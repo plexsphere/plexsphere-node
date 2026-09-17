@@ -215,6 +215,27 @@
             ])
           "a syntactically invalid plexsphere.node.sshAuthorizedKeys entry must fail the assertion";
 
+        # The machine image carries no key and leaves root's keys to
+        # cloud-init, so the emptiness half of the assertion gives way to
+        # services.cloud-init.enable. The validity half must not give way
+        # with it: sshd skips a malformed line whether or not cloud-init adds
+        # more, and keyless-node-rejected keeps covering a node that has
+        # neither.
+        keyless-node-allowed-with-cloud-init = passIf "keyless-node-allowed-with-cloud-init"
+          (!(assertionFired
+            (evalNode [ hostName { services.cloud-init.enable = true; } ])
+            "sshAuthorizedKeys")
+            && assertionFired
+              (evalNode [
+                hostName
+                {
+                  services.cloud-init.enable = true;
+                  plexsphere.node.sshAuthorizedKeys = [ "ssh-ed25519 AAAA-REPLACE-ME me@example.invalid" ];
+                }
+              ])
+              "sshAuthorizedKeys")
+          "with services.cloud-init.enable an empty plexsphere.node.sshAuthorizedKeys must pass the assertion and a malformed entry must still fail it";
+
         # The shapes above are what a paste gets wrong. These four are what
         # ssh-keygen -l accepts and this option does not, which makes them the
         # rule the installer has to restate: it fingerprints fetched keys with
