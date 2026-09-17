@@ -901,6 +901,44 @@
         image-state-version = passIf "image-state-version"
           (imageSystems.x86_64-linux.config.system.stateVersion == lib.trivial.release)
           "the machine image's system.stateVersion must equal the release of the pinned nixpkgs; a node booted from it is a fresh install";
+
+        # The README names what an operator types and where the files land:
+        # the build commands, the output path image-builder-settings pins, the
+        # plexd files the user-data writes, the firmware property and the
+        # NoCloud serial the boot commands depend on. Nothing but agreement
+        # ties those strings to the module, and a drift shows only on an
+        # instance that boots without its token or its identity. The module
+        # side is pinned by the names the README explains it with: the unit
+        # k3s and plexd wait for, the virtio profile and the serial console.
+        # The README's first command after a boot is cloud-init status, which
+        # resolves only because the image puts cloud-init on the PATH.
+        image-docs-match-the-module =
+          assert lib.all
+            (system: lib.elem imageSystems.${system}.pkgs.cloud-init
+              imageSystems.${system}.config.environment.systemPackages)
+            [ "x86_64-linux" "aarch64-linux" ];
+          pkgs.runCommand "image-docs-match-the-module" { } ''
+            for pattern in \
+                'nix build .#packages.x86_64-linux.image' \
+                'result/plexsphere-node-image-x86_64-linux.qcow2' \
+                '.#packages.aarch64-linux.image' \
+                /etc/plexd/bootstrap-token \
+                /etc/plexd/environment \
+                PLEXD_PROJECT_ID= \
+                PLEXD_RESOURCE_HANDLE= \
+                PLEXD_API= \
+                hw_firmware_type=uefi \
+                '-smbios type=1,serial=ds=nocloud' \
+                cloud-localds \
+                'cloud-init status --wait' \
+                plexsphere.disk.biosBoot; do
+              grep -q -F -- "$pattern" ${./README.md}
+            done
+            for pattern in cloud-final.service qemu-guest.nix ttyS0; do
+              grep -q -F -- "$pattern" ${./modules/image.nix}
+            done
+            touch $out
+          '';
       };
     };
 }
