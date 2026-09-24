@@ -96,8 +96,9 @@ in
       # the WireGuard interface, which follows interface_name: plexd's own
       # nftables chain hooks forward and never filters traffic addressed to
       # the host, so this rule is what keeps the range off every other
-      # network. Within the mesh it is wide open. The session forward is
-      # unauthenticated (the first peer to connect takes the session), and
+      # network. Within the mesh it is wide open. A tcp session's forward is
+      # unauthenticated (the first peer to connect takes the session), an ssh
+      # session's listener takes the session token as its password, and
       # any other socket bound to an ephemeral port on the mesh IP or the
       # wildcard address answers every peer too. Not tied to tunnel.enabled:
       # plexd forces that back on unless max_sessions is also set, so a
@@ -117,8 +118,11 @@ in
       systemd.services.plexd = {
         description = "plexd node agent";
         wantedBy = [ "multi-user.target" ];
-        after = [ "network-online.target" ];
-        wants = [ "network-online.target" ];
+        # plexd hands every ssh session's shell to the helper behind this
+        # socket and falls back to a child inside its own sandbox when the
+        # socket is missing, where the shell cannot switch users.
+        after = [ "network-online.target" "plexd-session-helper.socket" ];
+        wants = [ "network-online.target" "plexd-session-helper.socket" ];
         # No start rate limit, unlike upstream's StartLimitBurst=5: plexd is
         # the node's only link to the control plane, so parking the unit in
         # "failed" after a burst of quick exits would drop the node off the
@@ -183,6 +187,56 @@ in
           # ReadWritePaths=/var/lib/plexd /var/run/plexd.
           StateDirectory = "plexd";
           RuntimeDirectory = "plexd";
+        };
+      };
+
+      # plexd v0.8.0 serves mediated ssh sessions but starts no shell itself:
+      # the sandbox above bounds it to CAP_NET_ADMIN and CAP_NET_RAW and hides
+      # /home, so a process it forks cannot become the login user. It sends
+      # each launch to this socket instead, where systemd starts one root
+      # helper per connection. Both units mirror plexd's own
+      # deploy/systemd/plexd-session-helper.socket and
+      # plexd-session-helper@.service. The socket stays reachable from the
+      # sandbox: /run/plexd-session-helper.sock is under no InaccessiblePaths
+      # entry, and AF_UNIX is allowed. No Also= line: NixOS enables units
+      # through wantedBy, and plexd's Wants= pulls the socket in as well.
+      systemd.sockets.plexd-session-helper = {
+        description = "plexd session helper socket";
+        wantedBy = [ "sockets.target" ];
+        listenStreams = [ "/run/plexd-session-helper.sock" ];
+        socketConfig = {
+          SocketMode = "0600";
+          SocketUser = "root";
+          SocketGroup = "root";
+          Accept = true;
+          MaxConnections = 512;
+          TriggerLimitIntervalSec = 0;
+        };
+      };
+
+      # No sandbox, deliberately: the helper exists to run as unconfined
+      # root, so it can switch to the login user and reach its home. Its
+      # guard is the token check. It verifies every session token again,
+      # against tunnel.session_signing_public_key or the key it pinned at
+      # /etc/plexd/session-signing-key, and plexd cannot write /etc to
+      # replace either. --config also decides where that pin lives: beside
+      # the config file.
+      #
+      # Each instance holds one accepted connection, which a restarted
+      # instance cannot get back, so restarting one on nixos-rebuild switch
+      # would only kill the running shell. The next connection starts an
+      # instance of the new unit anyway.
+      systemd.services."plexd-session-helper@" = {
+        description = "plexd session helper (one mediated ssh process)";
+        restartIfChanged = false;
+        unitConfig.CollectMode = "inactive-or-failed";
+        serviceConfig = {
+          Type = "simple";
+          ExecStart = "${cfg.package}/bin/plexd session-helper --config /etc/plexd/config.yaml";
+          StandardInput = "null";
+          StandardOutput = "journal";
+          StandardError = "journal";
+          KillMode = "control-group";
         };
       };
     })

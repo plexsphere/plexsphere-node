@@ -457,6 +457,49 @@
               && evalThrows conflicting.config.services.plexd.settings.tunnel.session_signing_public_key)
             "services.plexd.sessionSigningPublicKey must reach tunnel.session_signing_public_key when set, add no tunnel block when unset, reject anything but a 44-character standard-base64 key, and conflict with a different settings value";
 
+        # Without the socket plexd runs the session helper as its own child,
+        # inside its sandbox, and every shell fails to switch users. The
+        # helper is useful only outside that sandbox, so no directive of
+        # plexd's unit may reach it, and restarting an instance on switch
+        # would only kill the shell it serves. plexd has to pull the socket
+        # in, start after it, and be able to connect(): a mask on the path
+        # would bring the child back, with no error but plexd's warning.
+        plexd-session-helper-units =
+          let
+            socket = defaultNode.config.systemd.sockets.plexd-session-helper;
+            helper = defaultNode.config.systemd.services."plexd-session-helper@";
+            plexd = defaultNode.config.systemd.services.plexd;
+          in
+          passIf "plexd-session-helper-units"
+            (socket.listenStreams == [ "/run/plexd-session-helper.sock" ]
+              && lib.elem "sockets.target" socket.wantedBy
+              && (socket.socketConfig.Accept or false) == true
+              && (socket.socketConfig.SocketMode or null) == "0600"
+              && (socket.socketConfig.SocketUser or null) == "root"
+              && (socket.socketConfig.SocketGroup or null) == "root"
+              && (helper.serviceConfig.ExecStart or null)
+                == "${defaultNode.config.services.plexd.package}/bin/plexd session-helper --config /etc/plexd/config.yaml"
+              && helper.restartIfChanged == false
+              && lib.all (k: !(helper.serviceConfig ? ${k}))
+                (lib.subtractLists [ "Type" "ExecStart" ] (lib.attrNames plexd.serviceConfig))
+              && lib.elem "plexd-session-helper.socket" plexd.wants
+              && lib.elem "plexd-session-helper.socket" plexd.after
+              && !(lib.any (lib.hasInfix "plexd-session-helper") plexd.serviceConfig.InaccessiblePaths))
+            "the plexd module must declare plexd-session-helper.socket (Accept=yes, 0600 root) and an unsandboxed plexd-session-helper@.service that runs the pinned plexd's session-helper with /etc/plexd/config.yaml and is never restarted on switch, and plexd must want, order after and reach the socket";
+
+        # The session helper trusts the key in /etc/plexd/config.yaml or the
+        # one it pinned at /etc/plexd/session-signing-key, and both are only
+        # a trust anchor while plexd cannot write /etc. ConfigurationDirectory
+        # or ReadWritePaths would reopen it to plexd without touching
+        # ProtectSystem, so all three are pinned.
+        plexd-session-anchor-read-only =
+          let service = defaultNode.config.systemd.services.plexd.serviceConfig; in
+          passIf "plexd-session-anchor-read-only"
+            (lib.elem (service.ProtectSystem or null) [ "full" "strict" ]
+              && !(service ? ReadWritePaths)
+              && !(service ? ConfigurationDirectory))
+            "plexd's unit must keep /etc read-only, or plexd could replace the session helper's pinned signing key at /etc/plexd/session-signing-key";
+
         # The sibling provisioning paths of issues #3 and #5 inherit this
         # module, so a later relaxation of either half of the posture would
         # reach them without a word: an sshd setting flipped back would carry
