@@ -343,7 +343,7 @@ This protects a leaked datastore, not a stolen disk: the key lives in `/var/lib/
 | `plexsphere.disk.device` | str | required | Disk the disko layout is applied to (disk module). Applying the layout wipes it; use a `/dev/disk/by-id/…` path. |
 | `plexsphere.disk.biosBoot` | bool | `false` | GRUB in hybrid BIOS/UEFI mode with a 1M BIOS boot partition, instead of UEFI-only systemd-boot (disk module, x86_64 only). The machine image sets it. |
 | `services.plexd.enable` | bool | `false` | Run plexd. The node profile sets it to `true`. |
-| `services.plexd.package` | package | plexd v0.7.0 release binary | The plexd package. |
+| `services.plexd.package` | package | plexd v0.8.0 release binary | The plexd package. |
 | `services.plexd.settings` | YAML attrset | `{ api.base_url = "https://api.plexsphere.com"; }` | Rendered to `/etc/plexd/config.yaml`; host values override the preset. The file is in the world-readable Nix store, so no credentials. |
 
 ### Firewall
@@ -397,3 +397,5 @@ cosign verify-blob \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   --bundle plexd-linux-amd64.sigstore.json plexd-linux-amd64
 ```
+
+The `plexd-package-has-session-helper` check runs the pinned binary's `plexd session-helper --help`, so a release without the subcommand the session helper unit starts fails `nix flake check`.

@@ -406,6 +406,18 @@
             touch $out
           '';
 
+        # The session helper unit starts `plexd session-helper`, a subcommand
+        # plexd gained in v0.8.0, and nothing else ties that unit to the
+        # binary the package pins. A release without it answers `unknown
+        # command "session-helper"` and exits 1, so a pin moved back or to a
+        # build that dropped the helper fails here, not on the first session
+        # a node is asked to serve.
+        plexd-package-has-session-helper =
+          pkgs.runCommand "plexd-package-has-session-helper" { } ''
+            ${defaultNode.config.services.plexd.package}/bin/plexd session-helper --help > /dev/null
+            touch $out
+          '';
+
         # The sibling provisioning paths of issues #3 and #5 inherit this
         # module, so a later relaxation of either half of the posture would
         # reach them without a word: an sshd setting flipped back would carry
