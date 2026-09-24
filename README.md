@@ -344,6 +344,7 @@ This protects a leaked datastore, not a stolen disk: the key lives in `/var/lib/
 | `plexsphere.disk.biosBoot` | bool | `false` | GRUB in hybrid BIOS/UEFI mode with a 1M BIOS boot partition, instead of UEFI-only systemd-boot (disk module, x86_64 only). The machine image sets it. |
 | `services.plexd.enable` | bool | `false` | Run plexd. The node profile sets it to `true`. |
 | `services.plexd.package` | package | plexd v0.8.0 release binary | The plexd package. |
+| `services.plexd.sessionSigningPublicKey` | nullOr str | `null` | The Domain's session-signing public key, 44 characters of standard base64, rendered to `tunnel.session_signing_public_key`. Unset, the session helper pins the key from `identity.json` on its first run. |
 | `services.plexd.settings` | YAML attrset | `{ api.base_url = "https://api.plexsphere.com"; }` | Rendered to `/etc/plexd/config.yaml`; host values override the preset. The file is in the world-readable Nix store, so no credentials. |
 
 ### Firewall

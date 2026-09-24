@@ -418,6 +418,45 @@
             touch $out
           '';
 
+        # plexd refuses to start on a malformed session_signing_public_key and
+        # restarts on it forever, so the option has to turn every shape plexd
+        # rejects into an evaluation error: no padding, the URL-safe
+        # alphabet, the hex a key is also commonly written in, and the
+        # trailing newline of a key read from a file. An unset key must leave
+        # the rendered file of every existing node as it was, and a second,
+        # different key in settings must not win silently. The key is a
+        # throwaway generated for this repository.
+        plexd-session-signing-key-option =
+          let
+            key = "4U1YI+YiHKMzeEXxk10y3mdBhsYxwmSrV9n3RSlmTRg=";
+            withKey = k: evalNode [
+              hostName
+              sshKey
+              { services.plexd.sessionSigningPublicKey = k; }
+            ];
+            conflicting = evalNode [
+              hostName
+              sshKey
+              {
+                services.plexd.sessionSigningPublicKey = key;
+                services.plexd.settings.tunnel.session_signing_public_key =
+                  "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+              }
+            ];
+          in
+          passIf "plexd-session-signing-key-option"
+            ((withKey key).config.services.plexd.settings.tunnel.session_signing_public_key == key
+              && !(defaultNode.config.services.plexd.settings ? tunnel)
+              && lib.all (k: evalThrows (withKey k).config.services.plexd.sessionSigningPublicKey) [
+                ""
+                "4U1YI+YiHKMzeEXxk10y3mdBhsYxwmSrV9n3RSlmTRg"
+                "4U1YI-YiHKMzeEXxk10y3mdBhsYxwmSrV9n3RSlmTRg="
+                "e14d5823e6221ca3337845f1935d32de674186c631c264ab57d9f74529664d18"
+                (key + "\n")
+              ]
+              && evalThrows conflicting.config.services.plexd.settings.tunnel.session_signing_public_key)
+            "services.plexd.sessionSigningPublicKey must reach tunnel.session_signing_public_key when set, add no tunnel block when unset, reject anything but a 44-character standard-base64 key, and conflict with a different settings value";
+
         # The sibling provisioning paths of issues #3 and #5 inherit this
         # module, so a later relaxation of either half of the posture would
         # reach them without a word: an sshd setting flipped back would carry
