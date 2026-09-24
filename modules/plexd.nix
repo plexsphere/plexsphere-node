@@ -28,6 +28,29 @@ in
         /etc/plexd/environment.
       '';
     };
+
+    # plexd refuses to start on a malformed tunnel.session_signing_public_key,
+    # even with tunneling disabled, and restarts on that error forever, which
+    # drops the node off the mesh. The type holds the value to the one shape
+    # plexd accepts, 32 bytes as standard base64, so a mistyped key fails
+    # evaluation instead. It is stricter than plexd in two places: plexd
+    # trims whitespace and reads "" as unset, where null is the way to leave
+    # the key unset here and a key read from a file goes through lib.trim.
+    sessionSigningPublicKey = lib.mkOption {
+      type = lib.types.nullOr (lib.types.strMatching "[A-Za-z0-9+/]{43}=");
+      default = null;
+      example = "4U1YI+YiHKMzeEXxk10y3mdBhsYxwmSrV9n3RSlmTRg=";
+      description = ''
+        The Domain's session-signing public key, as 44 characters of standard
+        base64, rendered to tunnel.session_signing_public_key. When set, plexd's
+        session helper trusts only this key. When null, the helper copies
+        signing_public_key from identity.json to /etc/plexd/session-signing-key
+        on its first run and trusts that file afterwards; setting the key at
+        provisioning closes that trust-on-first-use window. The helper does not
+        follow a signing-key rotation: after one, set the Domain's new key here.
+        It is a public key, so the world-readable Nix store holds nothing secret.
+      '';
+    };
   };
 
   config = lib.mkMerge [
@@ -35,6 +58,13 @@ in
       # Preset via mkDefault so any host-level api.base_url still wins.
       services.plexd.settings.api.base_url = lib.mkDefault "https://api.plexsphere.com";
     }
+
+    # Around the whole definition rather than the leaf: pushed down to the
+    # value, the condition would still leave an empty tunnel block in the
+    # rendered file of every node that sets no key.
+    (lib.mkIf (cfg.sessionSigningPublicKey != null) {
+      services.plexd.settings.tunnel.session_signing_public_key = cfg.sessionSigningPublicKey;
+    })
 
     (lib.mkIf cfg.enable {
       environment.etc."plexd/config.yaml" = {
