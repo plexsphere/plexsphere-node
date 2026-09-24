@@ -344,7 +344,7 @@ This protects a leaked datastore, not a stolen disk: the key lives in `/var/lib/
 | `plexsphere.disk.biosBoot` | bool | `false` | GRUB in hybrid BIOS/UEFI mode with a 1M BIOS boot partition, instead of UEFI-only systemd-boot (disk module, x86_64 only). The machine image sets it. |
 | `services.plexd.enable` | bool | `false` | Run plexd. The node profile sets it to `true`. |
 | `services.plexd.package` | package | plexd v0.8.0 release binary | The plexd package. |
-| `services.plexd.sessionSigningPublicKey` | nullOr str | `null` | The Domain's session-signing public key, 44 characters of standard base64, rendered to `tunnel.session_signing_public_key`. Unset, the session helper pins the key from `identity.json` on its first run. |
+| `services.plexd.sessionSigningPublicKey` | nullOr str | `null` | The Domain's session-signing public key, 44 characters of standard base64, rendered to `tunnel.session_signing_public_key`. Unset, the session helper pins the key from `identity.json` on its first run. See [Mediated ssh sessions](#mediated-ssh-sessions). |
 | `services.plexd.settings` | YAML attrset | `{ api.base_url = "https://api.plexsphere.com"; }` | Rendered to `/etc/plexd/config.yaml`; host values override the preset. The file is in the world-readable Nix store, so no credentials. |
 
 ### Firewall
@@ -357,7 +357,7 @@ The NixOS firewall stays on. The node opens:
 | `32768-60999/tcp` | `plexd0` (`services.plexd.settings.wireguard.interface_name`) | remote sessions from the control plane |
 | `6443/tcp`, `10250/tcp` | `cni0`, `flannel.1` | apiserver and kubelet, for pods |
 
-- The session range is the kernel's ephemeral port range and is open to every mesh peer. Session forwards are unauthenticated, so the first peer to connect takes a session, and any other service listening on an ephemeral port on the mesh IP or on `0.0.0.0` is reachable by every peer. A host that changes `net.ipv4.ip_local_port_range` has to open its own range.
+- The session range is the kernel's ephemeral port range and is open to every mesh peer. A tcp session's forward is unauthenticated, so the first peer to connect takes it; an ssh session's listener takes the session token as its password. Any other service listening on an ephemeral port on the mesh IP or on `0.0.0.0` is reachable by every peer. A host that changes `net.ipv4.ip_local_port_range` has to open its own range.
 - The CNI interfaces are deliberately not trusted, which would expose sshd and everything else on `0.0.0.0` to every pod. Open further host ports for workloads explicitly.
 - plexd's nftables table only enforces mesh policy on forwarded traffic; it is no host packet filter. Its health endpoints (`/healthz`, `/readyz`) listen on `127.0.0.1:9101` and are not opened. The bridge features (relay, user access, site-to-site) are off by default and need their own ports when enabled.
 
@@ -371,6 +371,16 @@ networking.firewall.interfaces.eth0 = {
 ```
 
 Flannel VXLAN is unauthenticated: whoever reaches `8472/udp` can inject frames into the pod network, past every NetworkPolicy. Never open it to an untrusted network.
+
+### Mediated ssh sessions
+
+plexd serves the control plane's ssh sessions (`plexctl ssh`, the Console terminal) by default. It starts no shell itself: each shell or command runs in `plexd-session-helper@.service`, one root instance per connection to `plexd-session-helper.socket` (`/run/plexd-session-helper.sock`, `0600`), outside plexd's sandbox. Root is the only account on a node, so sessions log in as root.
+
+- To refuse ssh sessions and keep tcp sessions, set `services.plexd.settings.tunnel.ssh_sessions_enabled = false;`.
+- The helper verifies every session token again, against `services.plexd.sessionSigningPublicKey` when it is set. Otherwise, on its first run, it copies the Domain's key from `identity.json` to `/etc/plexd/session-signing-key` and trusts only that file afterwards. plexd's unit keeps `/etc` read-only, so plexd cannot replace either. Setting the option when the node is provisioned skips the trust-on-first-use step.
+- The helper does not follow a signing-key rotation. After the Domain rotates its key, or after the node registers with another Domain, the ssh login still succeeds, but every shell and command fails with `plexd: tunnel: session helper refused: token refused: tunnel: session token: signature does not verify against a trusted key`. Set `services.plexd.sessionSigningPublicKey` to the new key. Deleting the pin does not help: the next run pins the key from `identity.json` again, and plexd rewrites that file only when it registers.
+- A command run through the session, and every entry of a token's allowed commands, has to name its program by absolute path, for example `/run/current-system/sw/bin/uptime`. The helper runs it through `bash -c` with `PATH` set to the FHS directories, which are empty on NixOS apart from `/bin/sh`. An interactive shell is a login shell and gets the normal `PATH` from `/etc/profile`.
+- Sessions open no PAM session and leave no utmp or lastlog record. The helper logs to `journalctl -u 'plexd-session-helper@*'`.
 
 ### Bootstrap token
 
