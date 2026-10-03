@@ -259,19 +259,35 @@ nixos-rebuild switch --flake .#node-x86_64 --target-host root@<address>
 
 A bootable NixOS medium with `plexsphere-install`, which asks for the node's identity on the console and installs the node onto a local disk.
 
-### Build and write the stick
+### Download the ISO
+
+CI builds the x86_64 installer ISO on every push to `main` and publishes it to `https://get.plexsphere.com/node/`, replacing the previous one:
+
+```bash
+curl -fLO https://get.plexsphere.com/node/plexsphere-node-installer-x86_64-linux.iso
+curl -fLO https://get.plexsphere.com/node/plexsphere-node-installer-x86_64-linux.iso.sha256
+sha256sum -c plexsphere-node-installer-x86_64-linux.iso.sha256
+```
+
+The checksum is served from the same host as the ISO, so it catches a broken download, not a tampered server. There is no published aarch64 ISO; build it yourself.
+
+### Build the ISO yourself
 
 ```bash
 nix build "git+file://$PWD?ref=HEAD#packages.x86_64-linux.installer-iso"
 ```
 
-Building the committed `HEAD` keeps untracked files, such as a kubeconfig lying in the checkout, out of the medium's world-readable Nix store. For aarch64 build `packages.aarch64-linux.installer-iso` on an aarch64 builder.
+The ISO lands at `result/iso/plexsphere-node-installer-x86_64-linux.iso`. Building the committed `HEAD` keeps untracked files, such as a kubeconfig lying in the checkout, out of the medium's world-readable Nix store. For aarch64 build `packages.aarch64-linux.installer-iso` on an aarch64 builder.
+
+### Write the stick
 
 `dd` overwrites the target device without asking. Name the stick, not one of your disks:
 
 ```bash
-sudo dd if=result/iso/plexsphere-node-installer-x86_64-linux.iso of=/dev/sdX bs=4M status=progress oflag=sync
+sudo dd if=plexsphere-node-installer-x86_64-linux.iso of=/dev/sdX bs=4M status=progress oflag=sync
 ```
+
+For a self-built ISO pass `if=result/iso/plexsphere-node-installer-x86_64-linux.iso`.
 
 ### Requirements
 
