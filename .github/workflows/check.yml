@@ -135,68 +135,16 @@ jobs:
       # A push to main publishes the x86_64 image to
       # https://get.plexsphere.com/node/, next to a .sha256 file that
       # sha256sum -c checks after a download. Pull requests never publish.
-      # The SFTP root is the web root, and the upload creates node/ when it is
-      # missing. The step reads four repository secrets:
-      #
-      #   SFTP_HOST         host name of the SFTP server
-      #   SFTP_USER         the dedicated upload user
-      #   SFTP_PASSWORD     that user's password
-      #   SFTP_KNOWN_HOSTS  the server's host key lines, as ssh-keyscan prints
-      #                     them; the host key is checked, never trusted on
-      #                     first use, since a server that only claims to be
-      #                     the host would receive the password
-      #
-      # sftp -b turns on BatchMode, which rules out password authentication.
-      # ssh keeps the first value it gets for an option, so -o BatchMode=no
-      # has to come before -b. The password reaches ssh through an askpass
-      # script that prints it from the environment, so it is never written to
-      # disk, and SSH_ASKPASS_REQUIRE=force makes ssh use that script without
-      # a terminal or a display.
-      #
-      # Both files are uploaded under a hidden .part name and renamed into
-      # place, so a download never reads a half-written image. The old file is
-      # removed before each rename because a plain SFTP rename does not
-      # replace an existing file. Leftover .part files of an aborted run are
-      # removed first: sftp carries the store's read-only mode over to the
-      # uploaded file, and a read-only .part could not be written again.
+      # .github/scripts/publish.sh does the upload and documents the four
+      # repository secrets it reads. The timeout ends a stalled upload, which
+      # would otherwise hold the publish group for up to six hours.
       - name: publish x86_64 machine image
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        timeout-minutes: 30
         env:
           IMAGE_DIR: ${{ steps.build.outputs.out }}
           SFTP_HOST: ${{ secrets.SFTP_HOST }}
           SFTP_USER: ${{ secrets.SFTP_USER }}
           SFTP_PASSWORD: ${{ secrets.SFTP_PASSWORD }}
           SFTP_KNOWN_HOSTS: ${{ secrets.SFTP_KNOWN_HOSTS }}
-        run: |
-          set -euo pipefail
-          for secret in SFTP_HOST SFTP_USER SFTP_PASSWORD SFTP_KNOWN_HOSTS; do
-            if [ -z "${!secret}" ]; then
-              echo "::error::the repository secret $secret is not set"
-              exit 1
-            fi
-          done
-          image=plexsphere-node-image-x86_64-linux.qcow2
-          cd "$RUNNER_TEMP"
-          cat > sftp_askpass <<'EOF'
-          #!/bin/sh
-          printf '%s\n' "$SFTP_PASSWORD"
-          EOF
-          chmod 700 sftp_askpass
-          printf '%s\n' "$SFTP_KNOWN_HOSTS" > sftp_known_hosts
-          (cd "$IMAGE_DIR" && sha256sum "$image") > "$image.sha256"
-          SSH_ASKPASS="$RUNNER_TEMP/sftp_askpass" SSH_ASKPASS_REQUIRE=force \
-          sftp -o BatchMode=no -b - \
-            -o PubkeyAuthentication=no \
-            -o PreferredAuthentications=password,keyboard-interactive \
-            -o UserKnownHostsFile=sftp_known_hosts -o StrictHostKeyChecking=yes \
-            "$SFTP_USER@$SFTP_HOST" <<EOF
-          -mkdir /node
-          -rm /node/.$image.part
-          -rm /node/.$image.sha256.part
-          put $IMAGE_DIR/$image /node/.$image.part
-          put $image.sha256 /node/.$image.sha256.part
-          -rm /node/$image
-          rename /node/.$image.part /node/$image
-          -rm /node/$image.sha256
-          rename /node/.$image.sha256.part /node/$image.sha256
-          EOF
+        run: .github/scripts/publish.sh "$IMAGE_DIR/plexsphere-node-image-x86_64-linux.qcow2"
