@@ -54,6 +54,16 @@ jobs:
 
   installer:
     runs-on: ubuntu-latest
+    # Pushes to main publish the ISO to a fixed URL. Two of them building at
+    # once could finish their uploads out of order and leave the older ISO
+    # behind that URL, so they share one group and run one after the other.
+    # Every other run gets a group of its own and is not held back. The group
+    # is not the image job's: GitHub keeps one pending job per group and
+    # cancels it when another one queues, so in a shared group the image and
+    # installer jobs of the newest push would cancel each other's pending
+    # jobs.
+    concurrency:
+      group: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'installer-publish' || format('installer-{0}', github.run_id) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: cachix/install-nix-action@630ae543ea3a38a9a4166f03376c02c50f408342 # v31
@@ -67,10 +77,12 @@ jobs:
       # an operator reaches for, so print it on every run rather than waiting
       # for a burn to fail.
       - name: build x86_64 installer image
+        id: build
         run: |
           set -euo pipefail
           out=$(nix build --no-link --print-out-paths .#packages.x86_64-linux.installer-iso)
           du -h "$out"/iso/*.iso
+          echo "out=$out" >> "$GITHUB_OUTPUT"
       # Only evaluated, not built: producing the aarch64 image needs an aarch64
       # builder, which an ubuntu-latest runner is not and emulation would not
       # make affordable. Evaluation still forces every module of the medium, so
@@ -79,6 +91,22 @@ jobs:
       # mastering an image nothing in CI boots.
       - name: evaluate aarch64 installer image
         run: nix eval .#packages.aarch64-linux.installer-iso.drvPath
+      # A push to main publishes the x86_64 ISO to
+      # https://get.plexsphere.com/node/, next to a .sha256 file that
+      # sha256sum -c checks after a download. Pull requests never publish.
+      # .github/scripts/publish.sh does the upload and documents the four
+      # repository secrets it reads. The timeout ends a stalled upload, which
+      # would otherwise hold the publish group for up to six hours.
+      - name: publish x86_64 installer image
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        timeout-minutes: 30
+        env:
+          ISO_DIR: ${{ steps.build.outputs.out }}
+          SFTP_HOST: ${{ secrets.SFTP_HOST }}
+          SFTP_USER: ${{ secrets.SFTP_USER }}
+          SFTP_PASSWORD: ${{ secrets.SFTP_PASSWORD }}
+          SFTP_KNOWN_HOSTS: ${{ secrets.SFTP_KNOWN_HOSTS }}
+        run: .github/scripts/publish.sh "$ISO_DIR/iso/plexsphere-node-installer-x86_64-linux.iso"
 
   image:
     runs-on: ubuntu-latest
