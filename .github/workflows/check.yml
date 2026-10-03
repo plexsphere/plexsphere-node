@@ -81,7 +81,7 @@ jobs:
         run: |
           set -euo pipefail
           out=$(nix build --no-link --print-out-paths .#packages.x86_64-linux.installer-iso)
-          du -h "$out"/iso/*.iso
+          du -h "$out/iso/plexsphere-node-installer-x86_64-linux.iso"
           echo "out=$out" >> "$GITHUB_OUTPUT"
       # Only evaluated, not built: producing the aarch64 image needs an aarch64
       # builder, which an ubuntu-latest runner is not and emulation would not
