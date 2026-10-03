@@ -120,6 +120,9 @@
         ];
       };
 
+      # Evaluated once per system and shared by the package and the checks.
+      installerSystems = lib.genAttrs [ "x86_64-linux" "aarch64-linux" ] installerSystem;
+
       # The machine image: the node of nixosModules.disk and nixosModules.node,
       # with cloud-init supplying the identity at first boot. Local and
       # unexported for the reason the medium above is: modules/image.nix as
@@ -175,7 +178,7 @@
 
         plexsphere-install = plexsphereInstallFor system;
 
-        installer-iso = (installerSystem system).config.system.build.isoImage;
+        installer-iso = installerSystems.${system}.config.system.build.isoImage;
 
         image = imageSystems.${system}.config.system.build.diskoImages;
       });
@@ -773,7 +776,7 @@
         # Forcing drvPath alone stops at WHNF, exactly as
         # example-hosts-evaluate does, so the check stays cheap.
         installer-iso-evaluates = passIf "installer-iso-evaluates"
-          (lib.all (system: (installerSystem system).config.system.build.isoImage ? drvPath)
+          (lib.all (system: installerSystems.${system}.config.system.build.isoImage ? drvPath)
             [ "x86_64-linux" "aarch64-linux" ])
           "the installer medium must evaluate on both architectures";
 
@@ -789,7 +792,7 @@
             (system:
               let
                 script = plexsphereInstallFor system;
-                medium = (installerSystem system).config;
+                medium = installerSystems.${system}.config;
               in
               lib.elem script medium.environment.systemPackages
               && lib.hasInfix script.name medium.services.getty.helpLine)
@@ -1048,6 +1051,43 @@
               ${./.github/scripts}/publish.sh \
               ${./.github/scripts}/publish-test.sh
             bash ${./.github/scripts}/publish-test.sh
+            touch $out
+          '';
+
+        # The publish steps are skipped on a pull request, so nothing there
+        # runs the two lines naming the files to upload, and the README is
+        # where an operator copies the download commands from. Nothing but
+        # agreement ties image.filePath, where iso-image.nix puts the ISO
+        # from the image.baseName modules/installer.nix sets and the
+        # extension isoImage.compressImage decides, to the path the
+        # installer job lists and uploads and to the URLs the README prints;
+        # image-builder-settings pins the qcow2 name. The listing runs on
+        # pull requests too, so a build that lands elsewhere fails there. A
+        # renamed ISO or a mistyped path fails here, not as a failed publish
+        # or a download that answers 404 after the merge. The README lines
+        # are matched whole, because the curl line of a file is a prefix of
+        # the curl line of its checksum and would keep passing with only the
+        # latter left.
+        published-files-match-the-docs =
+          assert installerSystems.x86_64-linux.config.image.filePath
+            == "iso/plexsphere-node-installer-x86_64-linux.iso";
+          pkgs.runCommand "published-files-match-the-docs" { } ''
+            grep -q -F -- 'du -h "$out/iso/plexsphere-node-installer-x86_64-linux.iso"' \
+              ${./.github/workflows/check.yml}
+            grep -q -F -- '.github/scripts/publish.sh "$ISO_DIR/iso/plexsphere-node-installer-x86_64-linux.iso"' \
+              ${./.github/workflows/check.yml}
+            grep -q -F -- '.github/scripts/publish.sh "$IMAGE_DIR/plexsphere-node-image-x86_64-linux.qcow2"' \
+              ${./.github/workflows/check.yml}
+            for name in \
+                plexsphere-node-installer-x86_64-linux.iso \
+                plexsphere-node-image-x86_64-linux.qcow2; do
+              for line in \
+                  "curl -fLO https://get.plexsphere.com/node/$name" \
+                  "curl -fLO https://get.plexsphere.com/node/$name.sha256" \
+                  "sha256sum -c $name.sha256"; do
+                grep -q -x -F -- "$line" ${./README.md}
+              done
+            done
             touch $out
           '';
       };
