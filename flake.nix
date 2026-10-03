@@ -1033,6 +1033,23 @@
             done
             touch $out
           '';
+
+        # The upload runs only on a push to main, so no pull request executes
+        # it, and a mistake in the script would first show after the merge, as
+        # a failed publish or a broken download behind the fixed URL.
+        # publish-test.sh runs the script against a stub sftp that behaves
+        # like the server where it matters: uploaded files are read-only and
+        # a rename does not replace. shellcheck runs first. The directory is
+        # interpolated, not the two files, so the test finds publish.sh
+        # beside itself in the store.
+        publish-script-test =
+          pkgs.runCommand "publish-script-test" { } ''
+            ${pkgs.shellcheck}/bin/shellcheck \
+              ${./.github/scripts}/publish.sh \
+              ${./.github/scripts}/publish-test.sh
+            bash ${./.github/scripts}/publish-test.sh
+            touch $out
+          '';
       };
     };
 }
