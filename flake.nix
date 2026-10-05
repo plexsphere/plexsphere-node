@@ -799,6 +799,26 @@
             [ "x86_64-linux" "aarch64-linux" ])
           "the installer medium must ship plexsphere-install and name it on the console";
 
+        # The banner reaches a console through an import of
+        # modules/banner.nix, one in modules/installer.nix and one in
+        # modules/node.nix, and dropping either breaks nothing: the machine
+        # greets with the stock NixOS welcome line and every other check
+        # stays green. So the greeting is pinned on everything an operator
+        # boots — the medium, the target the medium installs and the machine
+        # image. The greeting line forces no identity, which is why an
+        # install target can be asked for it without a host name.
+        consoles-show-the-banner = passIf "consoles-show-the-banner"
+          (lib.all
+            (system: lib.all
+              (host: lib.hasPrefix "+---" host.config.services.getty.greetingLine)
+              [
+                installerSystems.${system}
+                self.lib.installTargets.${system}
+                imageSystems.${system}
+              ])
+            [ "x86_64-linux" "aarch64-linux" ])
+          "the installer medium, the node it installs and the machine image must greet with the PLEXSPHERE banner on the console";
+
         # The template ships with an empty key list, so this supplies one the
         # way an operator's edit to node.nix would; every other value is the
         # template's own. Forcing the toplevel runs the module assertions on
