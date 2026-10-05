@@ -34,7 +34,7 @@ let
     lib.any (pattern: builtins.match "${pattern}( .*)?" key != null) keyPatterns;
 in
 {
-  imports = [ ./plexd.nix ];
+  imports = [ ./banner.nix ./plexd.nix ];
 
   options.plexsphere.node = {
     hostName = lib.mkOption {
