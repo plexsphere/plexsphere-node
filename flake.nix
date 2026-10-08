@@ -1162,6 +1162,57 @@
             touch $out
           '';
 
+        # The script above matters only if the image runs it and reads its
+        # output. All three bundle paths have to lead to the composed file,
+        # or whatever reads the one left behind ignores the user-data's
+        # certificates; the tmpfiles seed has to exist, or a boot whose
+        # compose fails leaves every TLS client without roots; and the unit
+        # has to start after write_files and before cloud-init's later
+        # stages, k3s and plexd, or plexd verifies the control plane against
+        # the public roots alone. Ordering only: a wants or requires in
+        # either direction would keep k3s and plexd down when the compose
+        # fails, or the compose down when no datasource is found. Nodes that
+        # are not the image keep the store bundle their configuration
+        # declares. The install target is given a host name because reading
+        # one environment.etc entry forces them all, /etc/hostname among
+        # them.
+        image-composes-ca-bundle =
+          let
+            composed = "/run/plexsphere/ca-bundle.crt";
+            keepsStoreBundle = host:
+              host.config.environment.etc."ssl/certs/ca-certificates.crt".source
+                == host.config.security.pki.caBundle;
+          in
+          passIf "image-composes-ca-bundle"
+            (lib.all
+              (system:
+                let
+                  image = imageSystems.${system}.config;
+                  trust = imageSystems.${system}.pkgs.callPackage ./packages/plexsphere-ca-trust.nix { };
+                  tmpfiles = image.systemd.tmpfiles.settings."10-plexsphere-ca" or { };
+                  unit = image.systemd.services.plexsphere-ca-trust;
+                  dependsOn = service: names:
+                    lib.any (name: lib.elem name (service.wants ++ service.requires)) names;
+                in
+                lib.all (path: image.environment.etc.${path}.source == composed)
+                  [ "ssl/certs/ca-certificates.crt" "ssl/certs/ca-bundle.crt" "pki/tls/certs/ca-bundle.crt" ]
+                && (tmpfiles.${composed}.C.argument or null) == image.security.pki.caBundle
+                && tmpfiles ? "/run/plexsphere".d
+                && unit.serviceConfig.ExecStart
+                  == "${trust}/bin/plexsphere-ca-trust ${image.security.pki.caBundle} /etc/plexsphere/ca-certificates ${composed}"
+                && lib.elem "multi-user.target" unit.wantedBy
+                && lib.elem "cloud-init.service" unit.after
+                && lib.all (name: lib.elem name unit.before)
+                  [ "cloud-config.service" "cloud-final.service" "k3s.service" "plexd.service" ]
+                && !(dependsOn unit
+                  [ "cloud-init.service" "cloud-config.service" "cloud-final.service" "k3s.service" "plexd.service" ])
+                && !(lib.any (name: dependsOn image.systemd.services.${name} [ "plexsphere-ca-trust.service" ])
+                  [ "k3s" "plexd" ]))
+              [ "x86_64-linux" "aarch64-linux" ]
+            && keepsStoreBundle defaultNode
+            && keepsStoreBundle (self.lib.installTargets.x86_64-linux.extendModules { modules = [ hostName ]; }))
+            "the machine image must point its three CA bundle paths at /run/plexsphere/ca-bundle.crt, seed that file from security.pki.caBundle through tmpfiles, and compose it in plexsphere-ca-trust.service after cloud-init.service and before cloud-config, cloud-final, k3s and plexd, ordering only; other nodes must keep the store bundle";
+
         # The image is 4G, and an instance gets the volume its flavor names.
         # Without the growth the node runs on the image's 3G of root whatever
         # the volume, until the container images k3s pulls fill it.
