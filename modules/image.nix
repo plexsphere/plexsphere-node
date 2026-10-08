@@ -5,6 +5,7 @@ let
   trust = pkgs.callPackage ../packages/plexsphere-ca-trust.nix { };
   certificateDirectory = "/etc/plexsphere/ca-certificates";
   composedBundle = "/run/plexsphere/ca-bundle.crt";
+  brokerBundle = "/etc/plexd/ca.crt";
 in
 {
   # virtio_blk, virtio_pci, virtio_scsi and virtio_net in the initrd.
@@ -108,22 +109,26 @@ in
 
   # The image is one disk for every instance, so no private CA can be built
   # into the bundle in its store: an instance trusts the certificates its
-  # user-data writes to /etc/plexsphere/ca-certificates/, and the three
-  # bundle paths of nixpkgs' ca.nix point at a file composed from them at
-  # every boot, the way nixpkgs points resolv.conf into /run for
-  # systemd-resolved. tmpfiles seeds that file with the public roots before
-  # sysinit.target, so it exists before any ordinary unit starts whether or
-  # not the compose runs; a dangling bundle would leave every TLS client on
-  # the node without roots. /run is volatile, so nothing composed on an
-  # earlier boot survives.
+  # user-data writes to /etc/plexsphere/ca-certificates/ and the bundle the
+  # plexsphere broker's cloud-init document writes to /etc/plexd/ca.crt,
+  # and the three bundle paths of nixpkgs' ca.nix point at a file composed
+  # from them at every boot, the way nixpkgs points resolv.conf into /run
+  # for systemd-resolved. tmpfiles seeds that file with the public roots
+  # before sysinit.target, so it exists before any ordinary unit starts
+  # whether or not the compose runs; a dangling bundle would leave every TLS
+  # client on the node without roots. /run is volatile, so nothing composed
+  # on an earlier boot survives, while /etc/plexd/ca.crt does, so every boot
+  # trusts it again.
   #
-  # cloud-init.service runs write_files, and cloud-config.service and
-  # cloud-final.service run runcmd, so the compose sits between them and
-  # ahead of k3s and plexd. Ordering only, never wants or requires: when no
-  # datasource is found, cloud-init.service fails and the compose still
-  # runs, and when the compose fails, k3s and plexd still start on the
-  # public roots. nix-daemon keeps the store bundle (CURL_CA_BUNDLE), which
-  # is all the public substituters need.
+  # cloud-init.service runs write_files, the broker's /etc/plexd/ca.crt
+  # among them, and cloud-config.service and cloud-final.service run runcmd,
+  # so the compose sits between them and ahead of k3s and plexd: the
+  # broker's CA is trusted before its runcmd's plexd join. Ordering only,
+  # never wants or requires: when no datasource is found,
+  # cloud-init.service fails and the compose still runs, and when the
+  # compose fails, k3s and plexd still start on the public roots.
+  # nix-daemon keeps the store bundle (CURL_CA_BUNDLE), which is all the
+  # public substituters need.
   environment.etc."ssl/certs/ca-certificates.crt".source = lib.mkForce composedBundle;
   environment.etc."ssl/certs/ca-bundle.crt".source = lib.mkForce composedBundle;
   environment.etc."pki/tls/certs/ca-bundle.crt".source = lib.mkForce composedBundle;
@@ -138,14 +143,14 @@ in
   };
 
   systemd.services.plexsphere-ca-trust = {
-    description = "Trust the CA certificates in ${certificateDirectory}";
+    description = "Trust the CA certificates in ${certificateDirectory} and ${brokerBundle}";
     wantedBy = [ "multi-user.target" ];
     after = [ "cloud-init.service" ];
     before = [ "cloud-config.service" "cloud-final.service" "k3s.service" "plexd.service" ];
     serviceConfig = {
       Type = "oneshot";
       RemainAfterExit = true;
-      ExecStart = "${trust}/bin/plexsphere-ca-trust ${config.security.pki.caBundle} ${certificateDirectory} ${composedBundle}";
+      ExecStart = "${trust}/bin/plexsphere-ca-trust ${config.security.pki.caBundle} ${certificateDirectory} ${composedBundle} ${brokerBundle}";
     };
   };
 }
