@@ -1298,12 +1298,14 @@
 
         # The README names what an operator types and where the files land:
         # the build commands, the output path image-builder-settings pins, the
-        # plexd files the user-data writes, the firmware property and the
-        # NoCloud serial the boot commands depend on. Nothing but agreement
-        # ties those strings to the module, and a drift shows only on an
-        # instance that boots without its token or its identity. The module
-        # side is pinned by the names the README explains it with: the unit
-        # k3s and plexd wait for, the virtio profile and the serial console.
+        # plexd files and the CA directory the user-data writes, the unit
+        # whose journal names the trusted certificates, the firmware property
+        # and the NoCloud serial the boot commands depend on. Nothing but
+        # agreement ties those strings to the module, and a drift shows only
+        # on an instance that boots without its token, its identity or its
+        # CA. The module side is pinned by the names the README explains it
+        # with: the unit k3s and plexd wait for, the virtio profile, the
+        # serial console and the composed bundle.
         # The README's first command after a boot is cloud-init status, which
         # resolves only because the image puts cloud-init on the PATH.
         image-docs-match-the-module =
@@ -1321,6 +1323,8 @@
                 PLEXD_PROJECT_ID= \
                 PLEXD_RESOURCE_HANDLE= \
                 PLEXD_API= \
+                /etc/plexsphere/ca-certificates/ \
+                plexsphere-ca-trust \
                 hw_firmware_type=uefi \
                 '-smbios type=1,serial=ds=nocloud' \
                 cloud-localds \
@@ -1328,7 +1332,7 @@
                 plexsphere.disk.biosBoot; do
               grep -q -F -- "$pattern" ${./README.md}
             done
-            for pattern in cloud-final.service qemu-guest.nix ttyS0; do
+            for pattern in cloud-final.service qemu-guest.nix ttyS0 /run/plexsphere/ca-bundle.crt; do
               grep -q -F -- "$pattern" ${./modules/image.nix}
             done
             touch $out
