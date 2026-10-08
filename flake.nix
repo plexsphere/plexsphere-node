@@ -770,10 +770,10 @@
               && installed.config.disko.devices.disk.main.device == "/dev/disk/by-id/check-disk")
             "an install target extended with a host name, an SSH key and a disk device must evaluate, take the injected host name, and let the plain device definition override the mkDefault placeholder";
 
-        # The check above covers the three mandatory fields; these are the two
-        # the script writes only when the operator answered the prompt, and
-        # neither is validated for it. An option renamed under
-        # plexsphere.node throws — that is what the assert forces — but
+        # The check above covers the three mandatory fields; these are the
+        # three the script writes only when the operator answered the prompt,
+        # and none is validated for it. An option renamed under
+        # plexsphere.node throws — that is what the asserts force — but
         # services.plexd.settings is freeform (modules/plexd.nix:19-23), so a
         # jq path drifting from plexd's schema, .api.baseUrl for
         # .api.base_url, evaluates cleanly and leaves the node registering
@@ -792,16 +792,20 @@
                   plexsphere.disk.device = "/dev/disk/by-id/check-disk";
                   plexsphere.node.hashedPasswordFile = "/etc/plexsphere/root-password-hash";
                   services.plexd.settings.api.base_url = "https://api.internal.example";
+                  plexsphere.node.extraCACertificates = [ placeholderCA ];
                 }
               ];
             };
           in
           assert installed.config.users.users.root.hashedPasswordFile
             == "/etc/plexsphere/root-password-hash";
+          assert installed.config.security.pki.certificates == [ placeholderCA ];
           pkgs.runCommand "installer-injects-optional-identity" { } ''
             grep -q -F -- '.plexsphere.node.hashedPasswordFile = "/etc/plexsphere/root-password-hash"' \
               ${self.packages.x86_64-linux.plexsphere-install}/bin/plexsphere-install
             grep -q -F -- '.services.plexd.settings.api.base_url = $url' \
+              ${self.packages.x86_64-linux.plexsphere-install}/bin/plexsphere-install
+            grep -q -F -- '.plexsphere.node.extraCACertificates = [$pem]' \
               ${self.packages.x86_64-linux.plexsphere-install}/bin/plexsphere-install
             rendered=${installed.config.environment.etc."plexd/config.yaml".source}
             grep -q 'https://api.internal.example' "$rendered"
