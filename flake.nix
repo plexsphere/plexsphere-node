@@ -1046,6 +1046,122 @@
             [ "x86_64-linux" "aarch64-linux" ])
           "the machine image must enable cloud-init with networkd and order k3s and plexd after cloud-final.service without wanting or requiring any cloud-init unit";
 
+        # The image trusts whatever plexsphere-ca-trust appends, system-wide
+        # and for every name, so the script is run here on the files an
+        # operator gets wrong: a key pasted along, two certificates, text
+        # that is none, and the tail of a key whose BEGIN line the paste
+        # lost, which passes the one-block rule and must still not be copied.
+        # The subject is text the certificate's issuer chose, so its line
+        # feeds and C1 controls (U+009B is CSI on the Linux console) reach
+        # the journal escaped; the file name is text the user-data chose, so
+        # it reaches it quoted by printf %q, its control bytes escaped, and
+        # so does the name of an entry that is a directory: no line printed
+        # holds a byte outside printable ASCII.
+        # A skipped file fails the unit and leaves every valid one trusted;
+        # a directory with nothing to trust leaves the system bundle as it
+        # is; an unreadable system bundle leaves the previous output alone.
+        # The derivation is the one the image starts.
+        ca-trust-script =
+          let
+            trust = imageSystems.x86_64-linux.pkgs.callPackage ./packages/plexsphere-ca-trust.nix { };
+          in
+          pkgs.runCommand "ca-trust-script" { nativeBuildInputs = [ pkgs.openssl ]; } ''
+            bundle=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt
+            compose() {
+              rc=0
+              ${trust}/bin/plexsphere-ca-trust "$@" > stdout 2> stderr || rc=$?
+            }
+            fail() {
+              echo "ca-trust-script: $1" >&2
+              exit 1
+            }
+
+            printf '%s' ${lib.escapeShellArg placeholderCA} > ca.crt
+            fingerprint=$(openssl x509 -in ca.crt -noout -fingerprint -sha256)
+
+            mkdir mixed
+            cp ca.crt mixed/good.crt
+            printf '%s' ${lib.escapeShellArg (placeholderCA + fakeKey)} > mixed/keyed.crt
+            printf '%s' ${lib.escapeShellArg (placeholderCA + placeholderCA)} > mixed/two.crt
+            echo 'not a certificate' > mixed/garbage.crt
+            compose "$bundle" mixed mixed.out
+            [ "$rc" = 1 ] || fail "a directory with a file to skip must exit 1, not $rc"
+            grep -q -x -F -- \
+              "trusting mixed/good.crt: subject=CN=plexsphere-node check CA sha256 Fingerprint=''${fingerprint#*=}" \
+              stdout || fail "stdout must name mixed/good.crt with its subject and fingerprint"
+            for name in keyed two garbage; do
+              grep -q -F -- "skipping mixed/$name.crt: " stderr ||
+                fail "stderr must name mixed/$name.crt as skipped"
+              if grep -q -F -- "mixed/$name.crt" stdout; then
+                fail "mixed/$name.crt must not be reported as trusted"
+              fi
+            done
+            openssl verify -no_check_time -CAfile mixed.out ca.crt ||
+              fail "the composed bundle must verify the certificate of mixed/good.crt"
+            if grep -q 'PRIVATE KEY' mixed.out; then
+              fail "the composed bundle must hold no private key"
+            fi
+            [ "$(grep -c -e '-----BEGIN ' mixed.out)" = $(($(grep -c -e '-----BEGIN ' "$bundle") + 1)) ] ||
+              fail "the composed bundle must hold the system bundle and one certificate more"
+            [ "$(stat -c %a mixed.out)" = 644 ] || fail "the composed bundle must be mode 644"
+
+            mkdir tail
+            printf '%s' ${lib.escapeShellArg (placeholderCA + "AAAA\n-----END PRIVATE KEY-----\n")} > tail/tail.crt
+            compose "$bundle" tail tail.out
+            [ "$rc" = 0 ] || fail "a certificate with a key's tail behind it must be trusted, not exit $rc"
+            openssl verify -no_check_time -CAfile tail.out ca.crt ||
+              fail "the composed bundle must verify the certificate of tail/tail.crt"
+            if grep -q 'PRIVATE KEY' tail.out; then
+              fail "only openssl's encoding of the certificate may be appended, never the rest of the file"
+            fi
+
+            mkdir crafted
+            openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes \
+              -keyout /dev/null -days 1 -utf8 -subj "/CN=lab$(printf '\n\302\233')2J" \
+              -out crafted/subject.crt
+            cp ca.crt "crafted/$(printf 'a\033[2Jb').crt"
+            cp ca.crt "crafted/$(printf 'e\t\n\302\233f').crt"
+            echo 'not a certificate' > "crafted/$(printf 'c\033[2Jd').crt"
+            echo 'not a certificate' > "crafted/$(printf 'g\t\n\302\233h').crt"
+            mkdir "crafted/$(printf 'i\033[2Jj').crt"
+            compose "$bundle" crafted crafted.out
+            grep -q -x -F -- \
+              "trusting crafted/subject.crt: subject=CN=lab\\0A\\C2\\9B2J $(openssl x509 -in crafted/subject.crt -noout -fingerprint -sha256)" \
+              stdout || fail "a subject's line feed and C1 controls must be printed escaped, followed by the fingerprint"
+            grep -q -F -- "trusting \$'crafted/a\\E[2Jb.crt': " stdout ||
+              fail "the name of a trusted file must be printed with its control bytes escaped"
+            grep -q -F -- "skipping \$'crafted/c\\E[2Jd.crt': " stderr ||
+              fail "the name of a skipped file must be printed with its control bytes escaped"
+            grep -q -F -- "trusting \$'crafted/e\\t\\n\\302\\233f.crt': " stdout ||
+              fail "the name of a trusted file must be printed with its tabs, line feeds and C1 controls escaped"
+            grep -q -F -- "skipping \$'crafted/g\\t\\n\\302\\233h.crt': " stderr ||
+              fail "the name of a skipped file must be printed with its tabs, line feeds and C1 controls escaped"
+            grep -q -F -- "skipping \$'crafted/i\\E[2Jj.crt': " stderr ||
+              fail "a directory with a .crt name must be skipped and named with its control bytes escaped"
+            if LC_ALL=C grep -q '[^[:print:]]' stdout stderr; then
+              fail "nothing printed may hold a byte outside printable ASCII"
+            fi
+
+            mkdir empty pem
+            cp ca.crt pem/good.pem
+            for directory in empty missing pem; do
+              compose "$bundle" "$directory" "$directory.out"
+              [ "$rc" = 0 ] || fail "$directory: nothing to trust must exit 0, not $rc"
+              cmp "$bundle" "$directory.out" || fail "$directory: the output must be the system bundle"
+            done
+
+            echo kept > kept.out
+            cp kept.out kept.ref
+            compose ./no-such-bundle mixed kept.out
+            [ "$rc" != 0 ] || fail "an unreadable system bundle must exit non-zero"
+            cmp kept.ref kept.out || fail "an unreadable system bundle must leave the output alone"
+
+            compose "$bundle" mixed
+            [ "$rc" = 2 ] || fail "a wrong argument count must exit 2, not $rc"
+
+            touch $out
+          '';
+
         # The image is 4G, and an instance gets the volume its flavor names.
         # Without the growth the node runs on the image's 3G of root whatever
         # the volume, until the container images k3s pulls fill it.
