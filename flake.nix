@@ -24,6 +24,36 @@
       placeholderKey =
         "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGPXc2jaNRNicoagGmYKp3Qxjo/+7Kgr0M+N8gTeqpli placeholder@example.invalid";
 
+      # plexsphere-ca-trust and the cacert build behind
+      # plexsphere.node.extraCACertificates parse every certificate they are
+      # given, so the checks need a real one. A self-signed throwaway CA
+      # generated once for this repository with
+      #   openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes \
+      #     -keyout /dev/null -days 36500 -subj '/CN=plexsphere-node check CA'
+      # Its key was never written anywhere, so nothing can be signed with it,
+      # and like placeholderKey it stays out of every deployable output.
+      placeholderCA = ''
+        -----BEGIN CERTIFICATE-----
+        MIIBnTCCAUOgAwIBAgIUDQU+c26sCqV3ozPQV/MgaXseM3gwCgYIKoZIzj0EAwIw
+        IzEhMB8GA1UEAwwYcGxleHNwaGVyZS1ub2RlIGNoZWNrIENBMCAXDTI2MTAwODE3
+        NTIwOVoYDzIxMjYwOTE0MTc1MjA5WjAjMSEwHwYDVQQDDBhwbGV4c3BoZXJlLW5v
+        ZGUgY2hlY2sgQ0EwWTATBgcqhkjOPQIBBggqhkjOPQMBBwNCAAT4aLPDvGbjAqqv
+        fWgEkpALzva+I0trCDSo793r7npKxp9g/cEOoUg22wgz9zHS8thGnM+e2ZsO1dVt
+        x6Y73Vajo1MwUTAdBgNVHQ4EFgQU7jhxeH4MARyrUPBZKtn+kQqFLYMwHwYDVR0j
+        BBgwFoAU7jhxeH4MARyrUPBZKtn+kQqFLYMwDwYDVR0TAQH/BAUwAwEB/zAKBggq
+        hkjOPQQDAgNIADBFAiEAz3HiK4FSkjHEoNlLTDtfPz5s+gcMVCirrEDwX8Wc+oAC
+        ICJu1hymFYvpNwUsJTb0OmkTFgvGUlEQBQg5TE6f4Q1L
+        -----END CERTIFICATE-----
+      '';
+
+      # The entry the live installer writes: it takes openssl's PEM through a
+      # command substitution, which drops the final newline a file ends in.
+      installerCA = lib.removeSuffix "\n" placeholderCA;
+
+      # The markers of a private key around a body that is none, so no key
+      # is committed: what the checks need is the BEGIN line a key brings.
+      fakeKey = "-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----\n";
+
       exampleModule = {
         system.stateVersion = "26.05";
 
@@ -528,6 +558,79 @@
               && defaultNode.config.users.users.root.hashedPasswordFile == null)
             "plexsphere.node.hashedPasswordFile must reach users.users.root.hashedPasswordFile, leave users.users.root.hashedPassword unset so no hash reaches the Nix store, stay unset when the option is not given, and must not relax the sshd posture that confines the credential to the console";
 
+        # buildcatrust skips a key block without a word and trusts every
+        # certificate in an entry, so what reaches the world-readable store
+        # and the bundle is decided by the assertion alone. Each refused
+        # entry is a mistake an operator makes: an empty string, the URL
+        # instead of the file, a bundle, a key pasted along, a key alone, a
+        # half-substituted body, a paste cut short before its END line, and
+        # the tail of a key whose BEGIN line the paste lost. The surrounding
+        # blank lines and the CRLF line endings of a file read with
+        # builtins.readFile are not one of them, nor is the missing final
+        # newline of the installer's entry, and the list reaches
+        # security.pki.certificates as given. Unset, nothing changes for an
+        # existing node.
+        extra-ca-certificates-validated =
+          let
+            withCA = ca: evalNode [
+              hostName
+              sshKey
+              { plexsphere.node.extraCACertificates = [ ca ]; }
+            ];
+            halfSubstituted = lib.concatStringsSep "\n"
+              (lib.imap0 (i: line: if i == 2 then "REPLACE-ME!" else line)
+                (lib.splitString "\n" placeholderCA));
+          in
+          passIf "extra-ca-certificates-validated"
+            (defaultNode.config.security.pki.certificates == [ ]
+              && lib.all
+                (ca:
+                  let host = withCA ca; in
+                  !(assertionFired host "extraCACertificates")
+                  && host.config.security.pki.certificates == [ ca ])
+                [
+                  placeholderCA
+                  ("\n" + placeholderCA + "\n\n")
+                  (lib.replaceStrings [ "\n" ] [ "\r\n" ] placeholderCA)
+                  installerCA
+                ]
+              && lib.all (ca: assertionFired (withCA ca) "extraCACertificates") [
+                ""
+                "http://ca.192-0-2-1.nip.io/lab-ca.crt"
+                (placeholderCA + placeholderCA)
+                (placeholderCA + fakeKey)
+                fakeKey
+                halfSubstituted
+                (lib.removeSuffix "-----END CERTIFICATE-----\n" placeholderCA)
+                (placeholderCA + "AAAA\n-----END PRIVATE KEY-----\n")
+              ])
+            "plexsphere.node.extraCACertificates must default to no certificate, pass one PEM certificate per entry to security.pki.certificates unchanged, also with CRLF line endings and without a final newline, and fail the assertion on an empty entry, a URL, two certificates, a certificate with a key, a key alone, a body that is not base64, a certificate cut short and a key's tail behind a certificate";
+
+        # The check above stops at the option's value. This one follows it
+        # into the file plexd, k3s and curl read: the bundle of a node that
+        # sets the option verifies the check CA, whether its entry ends in a
+        # newline like a file or not like the installer's, and the bundle of
+        # one that does not keeps refusing it.
+        extra-ca-certificates-trusted =
+          let
+            bundle = host: host.config.environment.etc."ssl/certs/ca-certificates.crt".source;
+            trusting = ca: evalNode [
+              hostName
+              sshKey
+              { plexsphere.node.extraCACertificates = [ ca ]; }
+            ];
+          in
+          pkgs.runCommand "extra-ca-certificates-trusted" { nativeBuildInputs = [ pkgs.openssl ]; } ''
+            printf '%s' ${lib.escapeShellArg placeholderCA} > ca.crt
+            openssl verify -no_check_time -CAfile ${bundle (trusting placeholderCA)} ca.crt
+            openssl verify -no_check_time -CAfile ${bundle (trusting installerCA)} ca.crt
+            if openssl verify -no_check_time -CAfile ${bundle defaultNode} ca.crt; then
+              echo "extra-ca-certificates-trusted: the bundle of a node without plexsphere.node.extraCACertificates trusts the check CA" >&2
+              exit 1
+            fi
+            touch $out
+          '';
+
         # Applying the layout is destructive and irreversible, so the target
         # must be named per host rather than defaulted.
         disk-device-required = passIf "disk-device-required"
@@ -897,8 +1000,10 @@
 
         # One image boots every instance made from it, so whatever identity it
         # carries, every one of those nodes shares: a host name puts them all
-        # on one k3s Node object, and a root key or password lets its holder
-        # into all of them. cloud-init supplies the identity at first boot.
+        # on one k3s Node object, a root key or password lets its holder into
+        # all of them, and a CA certificate built in would be trusted by every
+        # one of them. cloud-init supplies the identity at first boot, and the
+        # user-data the certificates.
         image-carries-no-identity = passIf "image-carries-no-identity"
           (lib.all
             (system:
@@ -906,9 +1011,10 @@
               image.networking.hostName == ""
               && image.users.users.root.openssh.authorizedKeys.keys == [ ]
               && image.users.users.root.hashedPasswordFile == null
-              && image.users.users.root.hashedPassword == null)
+              && image.users.users.root.hashedPassword == null
+              && image.security.pki.certificates == [ ])
             [ "x86_64-linux" "aarch64-linux" ])
-          "the machine image must carry no host name, no root SSH key and no root password";
+          "the machine image must carry no host name, no root SSH key, no root password and no extra CA certificate";
 
         # The ordering is what keeps k3s from registering its Node object under
         # the host name from before cloud-init, and plexd from starting before

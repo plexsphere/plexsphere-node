@@ -32,6 +32,35 @@ let
 
   isPublicKey = key:
     lib.any (pattern: builtins.match "${pattern}( .*)?" key != null) keyPatterns;
+
+  # buildcatrust, which builds the system bundle from
+  # security.pki.certificates, skips every PEM block that is not a
+  # certificate without a word, so a private key pasted next to a
+  # certificate would sit unnoticed in the world-readable store. Each rule
+  # refuses its own mistake: the count a key or a second certificate, the
+  # markers a key or a paste cut short, the alphabet a half-substituted
+  # body.
+  #
+  # The count comes first and reads the untrimmed entry, whose count
+  # trimming cannot change; && is lazy, so lib.trim's whole-string regex
+  # never runs over a bundle pasted as one entry. The body ends at the first
+  # END marker, which leaves a second certificate to the count rather than
+  # to the alphabet of its marker lines. builtins.match runs per line, never
+  # over the whole entry.
+  certificateBegin = "-----BEGIN CERTIFICATE-----";
+  certificateEnd = "-----END CERTIFICATE-----";
+
+  isCertificate = entry:
+    let
+      trimmed = lib.trim entry;
+      body = lib.head
+        (lib.splitString certificateEnd (lib.removePrefix certificateBegin trimmed));
+    in
+    lib.length (lib.splitString "-----BEGIN " entry) == 2
+    && lib.hasPrefix certificateBegin trimmed
+    && lib.hasSuffix certificateEnd trimmed
+    && lib.all (line: builtins.match "[A-Za-z0-9+/=]*" (lib.removeSuffix "\r" line) != null)
+      (lib.splitString "\n" body);
 in
 {
   imports = [ ./banner.nix ./plexd.nix ];
@@ -85,6 +114,26 @@ in
         `sshAuthorizedKeys`, which stays mandatory.
       '';
     };
+
+    extraCACertificates = lib.mkOption {
+      type = lib.types.listOf lib.types.str;
+      default = [ ];
+      example = lib.literalExpression "[ (builtins.readFile ./lab-ca.crt) ]";
+      description = ''
+        CA certificates the node trusts beside the public roots, for a
+        control plane whose TLS comes from a private CA. Each entry is one PEM
+        certificate, from `-----BEGIN CERTIFICATE-----` to
+        `-----END CERTIFICATE-----`.
+
+        The entries are appended to `/etc/ssl/certs/ca-certificates.crt`
+        through `security.pki.certificates`, the bundle OpenSSL, GnuTLS and Go
+        programs (plexd, k3s, curl) read.
+
+        They are copied into the world-readable Nix store, so a certificate
+        belongs here and a key never does. The machine image takes its
+        certificates from `/etc/plexsphere/ca-certificates/` at boot instead.
+      '';
+    };
   };
 
   config = {
@@ -95,6 +144,10 @@ in
         assertion = lib.all isPublicKey cfg.sshAuthorizedKeys
           && (cfg.sshAuthorizedKeys != [ ] || config.services.cloud-init.enable);
         message = "plexsphere.node.sshAuthorizedKeys must hold at least one syntactically valid OpenSSH public key ('<type> <base64> [comment]'). Password authentication is disabled on Plexsphere nodes and sshd skips a malformed key without failing, so an empty or mistyped list leaves the node unreachable after rebuild. With services.cloud-init.enable the list may be empty, because cloud-init writes root's keys from the datasource at first boot.";
+      }
+      {
+        assertion = lib.all isCertificate cfg.extraCACertificates;
+        message = "plexsphere.node.extraCACertificates must hold one PEM certificate per entry, from '-----BEGIN CERTIFICATE-----' to '-----END CERTIFICATE-----' with base64 lines between and nothing else. The entries are copied into the world-readable Nix store, so a private key next to a certificate would be readable by every user on the node, and several certificates in one entry trust more than the one whose fingerprint was compared.";
       }
     ];
 
@@ -108,6 +161,12 @@ in
     # with a definition from here.
     users.users.root.hashedPasswordFile =
       lib.mkIf (cfg.hashedPasswordFile != null) cfg.hashedPasswordFile;
+
+    # A plain definition: the list type merges it with any a host makes
+    # itself. Unset, it is [ ], the value nixpkgs already hands to
+    # cacert.override, so a node that sets nothing keeps its bundle's store
+    # path.
+    security.pki.certificates = cfg.extraCACertificates;
 
     services.openssh = {
       enable = true;
