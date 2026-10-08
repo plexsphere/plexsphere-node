@@ -50,7 +50,7 @@ The image lands at `result/plexsphere-node-image-x86_64-linux.qcow2`. For aarch6
 - Kernel, systemd and a login prompt on the serial console: `ttyS0` on x86_64, `ttyAMA0` on aarch64.
 - cloud-init writes the datasource's network configuration as systemd-networkd units. Without one, every Ethernet interface uses DHCP.
 - k3s and plexd start after cloud-init has finished, so k3s registers under the host name from the user-data and plexd finds the token file.
-- The system CA bundle is composed at every boot from the public roots and the `*.crt` files in `/etc/plexsphere/ca-certificates/`, before cloud-init's later stages, k3s and plexd start.
+- The system CA bundle is composed at every boot from the public roots, the `*.crt` files in `/etc/plexsphere/ca-certificates/` and the certificates in `/etc/plexd/ca.crt`, before cloud-init's later stages, k3s and plexd start.
 
 ### Write the user-data
 
@@ -84,9 +84,23 @@ The user-data stays readable while the instance runs; on OpenStack the metadata 
 ssh root@<address> 'umask 077; cat > /etc/plexd/bootstrap-token' <<< "$PLEXD_BOOTSTRAP_TOKEN"
 ```
 
+### Provision it through the plexsphere broker
+
+The image boots on the cloud-init document the plexsphere Provisioning Broker renders, unchanged: pass the document as the user-data. Each part of it does this on the image:
+
+- **`/etc/plexd/bootstrap-token`** holds the token, as in the user-data above.
+- **`/etc/plexd/environment`** is the file plexd reads, as in the user-data above. The document writes `PLEXD_API`, `PLEXD_PROJECT_ID`, `PLEXD_RESOURCE_HANDLE` and `PLEXD_BOOTSTRAP_TOKEN_FILE` there.
+- **`/etc/plexd/install-plexd.sh`**, the first runcmd entry, ends with `curl: command not found`. That is expected: the image ships plexd and downloads nothing, so cloud-init has no curl, and `/usr/local/bin` is read-only to runcmd.
+- **`/usr/local/bin/plexd join`**, the second runcmd entry, runs the image's own plexd through a link, registers the node and prints `node_id:` and `mesh_ip:`.
+- **`/etc/plexd/ca.crt`**, written when the control plane has a CA bundle configured, is trusted system-wide (see [Control plane behind a private CA](#control-plane-behind-a-private-ca)). The document's `ca_certs` key is skipped on NixOS.
+
+Both runcmd entries print to `journalctl -u cloud-final` and to the serial console. The image's cloud-init writes no `/var/log/cloud-init-output.log`.
+
+When `join` fails, because the control plane stays unreachable for the 5 minutes `join` retries, its certificate is not trusted, or it refuses the token, `cloud-init status` reports `error`. plexd.service starts anyway and registers on its own with `/etc/plexd/environment`, as long as the control plane has not consumed the token.
+
 ### Boot it locally with KVM
 
-For local tests, boot the image on a Linux machine with KVM, either with QEMU directly or through libvirt. Both hand cloud-init the user-data on a NoCloud seed image. Save the user-data above as `user-data`, and write `meta-data`:
+For local tests, boot the image on a Linux machine with KVM, either with QEMU directly or through libvirt. Both hand cloud-init the user-data on a NoCloud seed image. Save the user-data from [Write the user-data](#write-the-user-data), or the broker's document, as `user-data`, and write `meta-data`:
 
 ```yaml
 instance-id: plex-node-01
@@ -359,7 +373,7 @@ This protects a leaked datastore, not a stolen disk: the key lives in `/var/lib/
 | `plexsphere.node.hostName` | str | required | Host name of the node. k3s derives the Kubernetes node name from it, so it must be unique across the cluster. |
 | `plexsphere.node.sshAuthorizedKeys` | listOf str | `[ ]` | Root SSH keys in `ssh-keygen` form. Evaluation fails on an empty list (unless `services.cloud-init.enable` is set) and on a malformed or truncated key, because password authentication is off. RSA keys need at least 2048 bits. Option prefixes (`restrict`, `command=`) belong in `users.users.root.openssh.authorizedKeys.keys`. |
 | `plexsphere.node.hashedPasswordFile` | nullOr str | `null` | Path to a file with a `mkpasswd` hash for root, read at activation and kept out of the Nix store. Console login only. |
-| `plexsphere.node.extraCACertificates` | listOf str | `[ ]` | PEM certificates trusted beside the public roots, one per entry, appended to `/etc/ssl/certs/ca-certificates.crt`. They sit in the world-readable store, so certificates only. The machine image takes its certificates from `/etc/plexsphere/ca-certificates/` instead. See [Control plane behind a private CA](#control-plane-behind-a-private-ca). |
+| `plexsphere.node.extraCACertificates` | listOf str | `[ ]` | PEM certificates trusted beside the public roots, one per entry, appended to `/etc/ssl/certs/ca-certificates.crt`. They sit in the world-readable store, so certificates only. The machine image takes its certificates from `/etc/plexsphere/ca-certificates/` and `/etc/plexd/ca.crt` instead. See [Control plane behind a private CA](#control-plane-behind-a-private-ca). |
 | `plexsphere.disk.device` | str | required | Disk the disko layout is applied to (disk module). Applying the layout wipes it; use a `/dev/disk/by-id/…` path. |
 | `plexsphere.disk.biosBoot` | bool | `false` | GRUB in hybrid BIOS/UEFI mode with a 1M BIOS boot partition, instead of UEFI-only systemd-boot (disk module, x86_64 only). The machine image sets it. |
 | `services.plexd.enable` | bool | `false` | Run plexd. The node profile sets it to `true`. |
@@ -438,10 +452,11 @@ Then hand the certificate to the node:
         -----END CERTIFICATE-----
   ```
 
-  `journalctl -u plexsphere-ca-trust` prints a `trusting` line with the fingerprint for each file, and `systemctl is-failed plexsphere-ca-trust` prints `failed` when a file was skipped. cloud-init's own `ca_certs` key is skipped on NixOS and does nothing. plexd and k3s load the bundle once per process, so after a change to the directory on a running node run `systemctl restart plexsphere-ca-trust plexd k3s`.
+  `journalctl -u plexsphere-ca-trust` prints a `trusting` line with the fingerprint for each file, and `systemctl is-failed plexsphere-ca-trust` prints `failed` when a file was skipped. cloud-init's own `ca_certs` key is skipped on NixOS and does nothing. plexd and k3s load the bundle once per process, so after a change to the directory or to `/etc/plexd/ca.crt` on a running node run `systemctl restart plexsphere-ca-trust plexd k3s`.
+- machine image provisioned through the plexsphere broker ([Provision it through the plexsphere broker](#provision-it-through-the-plexsphere-broker)): nothing to write. The broker's document writes the control plane's configured CA bundle to `/etc/plexd/ca.crt`, and `journalctl -u plexsphere-ca-trust` prints one `trusting /etc/plexd/ca.crt certificate <k>` line per certificate. The fingerprint on each line is the SHA-256 the API logs as `ca_fingerprints_sha256`, there as lowercase hex without colons.
 - live USB installer: answer the **Extra CA certificate URL** prompt with the URL, and compare the fingerprint it prints.
 
-On every path: one certificate per entry, file or answer, and never a key. An entry or an answer holding a key or a second certificate is refused, and such a file is skipped.
+On every path: one certificate per entry, file or answer, except `/etc/plexd/ca.crt`, which holds the broker's bundle of one or more, and never a key. An entry or an answer holding a key or a second certificate is refused, and such a file is skipped. `/etc/plexd/ca.crt` holding anything but certificates is skipped whole.
 
 ### Upgrading plexd
 
