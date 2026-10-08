@@ -5,6 +5,8 @@
 , jq
 , curl
 , mkpasswd
+, openssl
+, gnugrep
 , diskoInstall
 , targetFlake
 , targetAttr
@@ -28,7 +30,7 @@ writeShellApplication {
   # :$PATH), which on a NixOS live medium is where systemd lives; nixos-install,
   # xcp and nix come from disko-install's own wrapper. Naming any of them here
   # would pin a second copy of them into the closure of the ISO that ships this.
-  runtimeInputs = [ diskoInstall coreutils util-linux openssh jq curl mkpasswd ];
+  runtimeInputs = [ diskoInstall coreutils util-linux openssh jq curl mkpasswd openssl gnugrep ];
 
   text = ''
     # nixpkgs' installation-device.nix auto-logs in the unprivileged "nixos"
@@ -410,6 +412,63 @@ writeShellApplication {
       echo "the control-plane URL must be a full https:// URL; plexd presents the bootstrap token to it" >&2
     done
 
+    # A private CA is served to machines that do not trust it yet (the lab
+    # serves http://ca.<ip-dashed>.nip.io/lab-ca.crt), so plain http is
+    # allowed here, unlike for the keys above: what authenticates these
+    # bytes is the typed confirmation of the fingerprint below, not the
+    # transport. The file must hold one PEM block, and only openssl's
+    # encoding of the one certificate in it is kept, so neither a key nor a
+    # second certificate reaches the module, whose entries are copied into
+    # the world-readable store.
+    caFile=$(mktemp "$workdir/ca.XXXXXX")
+    caPem=
+    caFingerprint=
+    while true; do
+      printf 'Extra CA certificate URL, for a control plane behind a private CA (optional; blank to skip): '
+      read -r caUrl
+      [ -n "$caUrl" ] || break
+      case $caUrl in
+        http://?* | https://?*) ;;
+        *)
+          echo "the CA certificate URL must be an http:// or https:// URL" >&2
+          continue
+          ;;
+      esac
+
+      if ! caEffectiveUrl=$(curl --silent --show-error --fail --location \
+          --proto '=http,https' --proto-redir '=http,https' \
+          --max-filesize 65536 --max-time 20 \
+          --write-out '%{url_effective}' --output "$caFile" "$caUrl"); then
+        echo "could not fetch $caUrl" >&2
+        continue
+      fi
+
+      if [ "$(grep -c -e '-----BEGIN ' "$caFile")" != 1 ] ||
+          ! caPem=$(openssl x509 -in "$caFile" -outform PEM 2> /dev/null); then
+        caPem=
+        echo "$caUrl does not hold exactly one PEM certificate; the installer trusts one certificate and nothing else" >&2
+        continue
+      fi
+
+      # The subject is text the certificate's issuer chose. -nameopt RFC2253
+      # escapes its control bytes and every byte above 0x7f as \XX, and tr
+      # keeps one line of printable ASCII, so it can print neither a line of
+      # its own nor a C1 control such as U+009B, which the Linux console
+      # takes for CSI. The fingerprint comes from its own call, so no subject
+      # text reaches it or the summary below.
+      caSubject=$(openssl x509 -in "$caFile" -noout -subject -nameopt RFC2253 |
+        tr -cd '\040-\176')
+      caFingerprint=$(openssl x509 -in "$caFile" -noout -fingerprint -sha256)
+      echo "Certificate at $caEffectiveUrl:"
+      echo "  $caSubject"
+      echo "  $caFingerprint"
+      printf "Compare the fingerprint with the one the control plane publishes. Type 'yes' to trust this certificate on the node: "
+      read -r answer
+      [ "$answer" != yes ] || break
+      caPem=
+      caFingerprint=
+    done
+
     echo
     echo "About to install Plexsphere with:"
     echo "  disk:             $device"
@@ -432,6 +491,11 @@ writeShellApplication {
       echo "  control plane:    $apiBaseUrl"
     else
       echo "  control plane:    https://api.plexsphere.com"
+    fi
+    if [ -n "$caPem" ]; then
+      echo "  extra CA:         $caFingerprint"
+    else
+      echo "  extra CA:         none"
     fi
     echo
     echo "This rewrites the partition table of $device and destroys everything on it."
@@ -459,6 +523,13 @@ writeShellApplication {
 
     if [ -n "$apiBaseUrl" ]; then
       systemConfig=$(jq --arg url "$apiBaseUrl" '.services.plexd.settings.api.base_url = $url' <<< "$systemConfig")
+    fi
+
+    # The certificate is public, so it travels in --system-config and lands
+    # in the store, unlike the hash and the token, which go through
+    # --extra-files below.
+    if [ -n "$caPem" ]; then
+      systemConfig=$(jq --arg pem "$caPem" '.plexsphere.node.extraCACertificates = [$pem]' <<< "$systemConfig")
     fi
 
     # The flake reference and the disk name are spelled out rather than held
