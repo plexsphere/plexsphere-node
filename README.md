@@ -16,7 +16,7 @@ A Nix flake that turns a machine into a Plexsphere node: from bare metal, from a
 | [Live USB installer](#live-usb-installer) | Installing onto local hardware with no usable operating system |
 | [Existing NixOS machine](#existing-nixos-machine) | Adding the node profile to a NixOS configuration you already have |
 
-The [node reference](#node-reference) covers the options, the firewall, the bootstrap token and upgrading plexd.
+The [node reference](#node-reference) covers the options, the firewall, the bootstrap token, a control plane behind a private CA and upgrading plexd.
 
 ## Machine image
 
@@ -44,12 +44,13 @@ The image lands at `result/plexsphere-node-image-x86_64-linux.qcow2`. For aarch6
 
 ### What is in the image
 
-- k3s and plexd, enabled. No host name, no root SSH key, no root password, no bootstrap token.
+- k3s and plexd, enabled. No host name, no root SSH key, no root password, no bootstrap token, no extra CA.
 - A 4 GB disk. At first boot the root partition and its ext4 file system grow to fill the volume.
 - The x86_64 image boots from BIOS and UEFI (GRUB in hybrid mode, `plexsphere.disk.biosBoot`). The aarch64 image boots from UEFI with systemd-boot.
 - Kernel, systemd and a login prompt on the serial console: `ttyS0` on x86_64, `ttyAMA0` on aarch64.
 - cloud-init writes the datasource's network configuration as systemd-networkd units. Without one, every Ethernet interface uses DHCP.
 - k3s and plexd start after cloud-init has finished, so k3s registers under the host name from the user-data and plexd finds the token file.
+- The system CA bundle is composed at every boot from the public roots and the `*.crt` files in `/etc/plexsphere/ca-certificates/`, before cloud-init's later stages, k3s and plexd start.
 
 ### Write the user-data
 
@@ -75,6 +76,7 @@ write_files:
 - **`ssh_authorized_keys`** go to `root`, the only account. Keys from the platform, such as an OpenStack keypair, are added too. The image has no root password, so an instance booted without any key cannot be logged into; boot a new one.
 - **`/etc/plexd/bootstrap-token`** is where plexd reads the token (see [Bootstrap token](#bootstrap-token)).
 - **`/etc/plexd/environment`** sets `PLEXD_PROJECT_ID`, the UUID of the project the node registers into, and `PLEXD_RESOURCE_HANDLE`, the platform resource it binds to. Without either, plexd exits with `project_id is required` or `resource_handle is required` and restarts every 5 seconds. `PLEXD_API` is optional and points plexd at a control plane other than `https://api.plexsphere.com`.
+- **`/etc/plexsphere/ca-certificates/<name>.crt`** is optional: one CA certificate per file, trusted system-wide beside the public roots, for a control plane behind a private CA (see [Control plane behind a private CA](#control-plane-behind-a-private-ca)).
 
 The user-data stays readable while the instance runs; on OpenStack the metadata service hands it, token included, to any process on the instance, pods included. The token is one-time, and plexd deletes the file after registering. To keep the token out of the user-data, drop its `write_files` entry and write the file after the boot:
 
@@ -194,7 +196,7 @@ mkdir plex-node-01 && cd plex-node-01
 nix flake init -t github:plexsphere/plexsphere-node#node
 ```
 
-This writes `flake.nix` and `node.nix`. The flake defines `node-x86_64` and `node-aarch64`; use the one matching `uname -m` on the target. In a git repository, `git add` both files, because Nix only reads tracked files.
+This writes `flake.nix` and `node.nix`. The flake defines `node-x86_64` and `node-aarch64`; use the one matching `uname -m` on the target. In a git repository, `git add` both files, and a CA certificate file once `node.nix` reads one, because Nix only reads tracked files.
 
 Edit `node.nix`:
 
@@ -202,7 +204,7 @@ Edit `node.nix`:
 2. **`plexsphere.node.sshAuthorizedKeys`**: at least one root SSH key. Evaluation fails while it is empty or a key is malformed.
 3. **`plexsphere.disk.device`**: the disk to wipe, as a `/dev/disk/by-id` alias. List them with `ssh root@<address> ls -l /dev/disk/by-id` and take one naming the hardware (`ata-`, `nvme-`, `scsi-`, `usb-`, `virtio-`, `mmc-`; `wwn-` only if there is no other). Not `/dev/sda`: the kexec boots a new kernel that may assign kernel names differently. Aliases such as `lvm-pv-uuid-`, `md-` or `dm-` vanish with the wipe. A virtual disk needs a serial in the hypervisor to get an alias.
 
-The two commented lines are optional: a console root password (next step) and a control plane other than `https://api.plexsphere.com`. Leave `system.stateVersion` unchanged.
+The three commented lines are optional: a console root password (next step), a control plane other than `https://api.plexsphere.com`, and the CA certificate of a control plane behind a private CA (see [Control plane behind a private CA](#control-plane-behind-a-private-ca)). Leave `system.stateVersion` unchanged.
 
 ### Bootstrap token and root password
 
@@ -311,6 +313,7 @@ It asks:
 4. **Root password**, optional. Console only; SSH stays key-only.
 5. **plexd bootstrap token**, optional (see [Bootstrap token](#bootstrap-token)).
 6. **Control-plane URL**, optional; blank keeps `https://api.plexsphere.com`.
+7. **Extra CA certificate URL**, optional, for a control plane behind a private CA. The installer fetches it, plain http included, shows its fingerprint and trusts it only after a typed `yes`, so the URL must be reachable from the medium too (see [Control plane behind a private CA](#control-plane-behind-a-private-ca)).
 
 It then shows the answers and waits for `yes`. That is the point of no return: the target disk is wiped. Anything else aborts with the disk untouched. After the install the machine offers a reboot. The token lands in `/etc/plexd/bootstrap-token`, the password hash in `/etc/plexsphere/root-password-hash`, both `0600 root:root`.
 
@@ -356,6 +359,7 @@ This protects a leaked datastore, not a stolen disk: the key lives in `/var/lib/
 | `plexsphere.node.hostName` | str | required | Host name of the node. k3s derives the Kubernetes node name from it, so it must be unique across the cluster. |
 | `plexsphere.node.sshAuthorizedKeys` | listOf str | `[ ]` | Root SSH keys in `ssh-keygen` form. Evaluation fails on an empty list (unless `services.cloud-init.enable` is set) and on a malformed or truncated key, because password authentication is off. RSA keys need at least 2048 bits. Option prefixes (`restrict`, `command=`) belong in `users.users.root.openssh.authorizedKeys.keys`. |
 | `plexsphere.node.hashedPasswordFile` | nullOr str | `null` | Path to a file with a `mkpasswd` hash for root, read at activation and kept out of the Nix store. Console login only. |
+| `plexsphere.node.extraCACertificates` | listOf str | `[ ]` | PEM certificates trusted beside the public roots, one per entry, appended to `/etc/ssl/certs/ca-certificates.crt`. They sit in the world-readable store, so certificates only. The machine image takes its certificates from `/etc/plexsphere/ca-certificates/` instead. See [Control plane behind a private CA](#control-plane-behind-a-private-ca). |
 | `plexsphere.disk.device` | str | required | Disk the disko layout is applied to (disk module). Applying the layout wipes it; use a `/dev/disk/by-id/…` path. |
 | `plexsphere.disk.biosBoot` | bool | `false` | GRUB in hybrid BIOS/UEFI mode with a 1M BIOS boot partition, instead of UEFI-only systemd-boot (disk module, x86_64 only). The machine image sets it. |
 | `services.plexd.enable` | bool | `false` | Run plexd. The node profile sets it to `true`. |
@@ -406,6 +410,38 @@ plexd reads its registration token from `/etc/plexd/bootstrap-token`, or from `P
 - SSH takeover: `--extra-files` ([Bootstrap token and root password](#bootstrap-token-and-root-password))
 - live USB installer: prompt
 - existing NixOS machine: write the file yourself
+
+### Control plane behind a private CA
+
+plexd, k3s and curl verify the control plane against the system CA bundle, `/etc/ssl/certs/ca-certificates.crt`. plexd has no CA option of its own, so a control plane whose TLS certificate comes from a private CA has to be trusted through that bundle. `api.tls_insecure_skip_verify` is no way around it: it hands the node, and its bootstrap token, to anyone on the path.
+
+The plexsphere lab is such a control plane. It serves its CA over plain HTTP, because a machine that does not trust the CA yet cannot fetch it over HTTPS:
+
+```bash
+curl -fsSLo lab-ca.crt http://ca.<ip-dashed>.nip.io/lab-ca.crt
+openssl x509 -in lab-ca.crt -noout -fingerprint -sha256
+```
+
+Compare the fingerprint with the one the control plane's operator publishes (for the lab, the one its bootstrap prints and the last line of its `verify.sh`) and trust the file only on a match. The command also proves that the file parses. That matters on the SSH takeover: a certificate truncated inside its base64 passes the option's evaluation check and fails only when the node is built, which `--build-on remote` does after the disk is partitioned.
+
+Then hand the certificate to the node:
+
+- existing NixOS machine and SSH takeover: set `plexsphere.node.extraCACertificates = [ (builtins.readFile ./lab-ca.crt) ];` and `git add lab-ca.crt`.
+- machine image: write the certificate to `/etc/plexsphere/ca-certificates/` in the user-data:
+
+  ```yaml
+  write_files:
+    - path: /etc/plexsphere/ca-certificates/plexsphere-lab.crt
+      content: |
+        -----BEGIN CERTIFICATE-----
+        ...
+        -----END CERTIFICATE-----
+  ```
+
+  `journalctl -u plexsphere-ca-trust` prints a `trusting` line with the fingerprint for each file, and `systemctl is-failed plexsphere-ca-trust` prints `failed` when a file was skipped. cloud-init's own `ca_certs` key is skipped on NixOS and does nothing. plexd and k3s load the bundle once per process, so after a change to the directory on a running node run `systemctl restart plexsphere-ca-trust plexd k3s`.
+- live USB installer: answer the **Extra CA certificate URL** prompt with the URL, and compare the fingerprint it prints.
+
+On every path: one certificate per entry, file or answer, and never a key. An entry or an answer holding a key or a second certificate is refused, and such a file is skipped.
 
 ### Upgrading plexd
 
