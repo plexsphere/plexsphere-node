@@ -1060,6 +1060,17 @@
         # A skipped file fails the unit and leaves every valid one trusted;
         # a directory with nothing to trust leaves the system bundle as it
         # is; an unreadable system bundle leaves the previous output alone.
+        # The broker's bundle file, the fourth argument, may hold several
+        # certificates and sits beside the directory's files, but it is
+        # trusted whole or not at all: a key, a block that is no
+        # certificate, a block without its END line, or a directory in its
+        # place skips all of it, the valid certificate in front included.
+        # A key's tail behind its certificates is dropped, as in a
+        # directory file, and so is text in front of and between them,
+        # such as the subject lines openssl s_client -showcerts writes. A
+        # missing, empty or blank bundle file is a document without a
+        # bundle and leaves the system bundle as it is; a file of bytes a
+        # UTF-8 locale cannot decode is not blank and is skipped.
         # The derivation is the one the image starts.
         ca-trust-script =
           let
@@ -1150,6 +1161,116 @@
               cmp "$bundle" "$directory.out" || fail "$directory: the output must be the system bundle"
             done
 
+            systemCount=$(grep -c -e '-----BEGIN ' "$bundle")
+            openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes \
+              -keyout /dev/null -days 1 -subj '/CN=plexsphere-node check bundle CA' \
+              -out second.crt
+            secondLine="$(openssl x509 -in second.crt -noout -subject -nameopt RFC2253) $(openssl x509 -in second.crt -noout -fingerprint -sha256)"
+
+            cat ca.crt second.crt > bundle.crt
+            compose "$bundle" empty bundle.out bundle.crt
+            [ "$rc" = 0 ] || fail "a bundle file of two certificates must be trusted, not exit $rc"
+            grep -q -x -F -- \
+              "trusting bundle.crt certificate 1: subject=CN=plexsphere-node check CA sha256 Fingerprint=''${fingerprint#*=}" \
+              stdout || fail "stdout must name the first certificate of bundle.crt with its subject and fingerprint"
+            grep -q -x -F -- "trusting bundle.crt certificate 2: $secondLine" stdout ||
+              fail "stdout must name the second certificate of bundle.crt with its subject and fingerprint"
+            openssl verify -no_check_time -CAfile bundle.out ca.crt second.crt ||
+              fail "the composed bundle must verify both certificates of bundle.crt"
+            [ "$(grep -c -e '-----BEGIN ' bundle.out)" = $((systemCount + 2)) ] ||
+              fail "the composed bundle must hold the system bundle and both certificates of bundle.crt"
+
+            mkdir single
+            cp ca.crt single/good.crt
+            cp second.crt second-only.crt
+            compose "$bundle" single single.out second-only.crt
+            [ "$rc" = 0 ] || fail "a directory file and a bundle file must both be trusted, not exit $rc"
+            grep -q -x -F -- \
+              "trusting single/good.crt: subject=CN=plexsphere-node check CA sha256 Fingerprint=''${fingerprint#*=}" \
+              stdout || fail "stdout must name single/good.crt beside the bundle file"
+            grep -q -x -F -- "trusting second-only.crt certificate 1: $secondLine" stdout ||
+              fail "stdout must name the certificate of second-only.crt beside the directory file"
+            [ "$(grep -c -e '-----BEGIN ' single.out)" = $((systemCount + 2)) ] ||
+              fail "the composed bundle must hold the system bundle, the directory file and the bundle file"
+
+            printf '%s' ${lib.escapeShellArg (placeholderCA + fakeKey)} > bundle-keyed.crt
+            printf '%s' ${lib.escapeShellArg (placeholderCA + "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n")} > bundle-body.crt
+            printf '%s' ${lib.escapeShellArg (lib.removeSuffix "-----END CERTIFICATE-----\n" placeholderCA)} > bundle-cut.crt
+            mkdir bundle-dir.crt
+            for name in bundle-keyed bundle-body bundle-cut bundle-dir; do
+              compose "$bundle" empty "$name.out" "$name.crt"
+              [ "$rc" = 1 ] || fail "$name.crt must be skipped with exit 1, not $rc"
+              grep -q -x -F -- \
+                "skipping $name.crt: it must hold one or more PEM certificates and nothing else" \
+                stderr || fail "stderr must name $name.crt as skipped"
+              if grep -q -F -- "trusting $name.crt" stdout; then
+                fail "no certificate of $name.crt may be reported as trusted"
+              fi
+              if grep -q 'PRIVATE KEY' "$name.out"; then
+                fail "the composed bundle must hold no private key from $name.crt"
+              fi
+              [ "$(grep -c -e '-----BEGIN ' "$name.out")" = "$systemCount" ] ||
+                fail "$name.crt must be skipped whole, its valid certificate included"
+            done
+
+            printf '%s' ${lib.escapeShellArg (placeholderCA + "AAAA\n-----END PRIVATE KEY-----\n")} > bundle-tail.crt
+            compose "$bundle" empty bundle-tail.out bundle-tail.crt
+            [ "$rc" = 0 ] || fail "a bundle file with a key's tail behind its certificate must be trusted, not exit $rc"
+            grep -q -F -- "trusting bundle-tail.crt certificate 1: " stdout ||
+              fail "stdout must name the certificate of bundle-tail.crt"
+            openssl verify -no_check_time -CAfile bundle-tail.out ca.crt ||
+              fail "the composed bundle must verify the certificate of bundle-tail.crt"
+            if grep -q 'PRIVATE KEY' bundle-tail.out; then
+              fail "only openssl's encoding of each certificate may be appended, never the rest of the bundle file"
+            fi
+
+            { echo 'plexsphere-node bundle preamble'; cat ca.crt; echo 'plexsphere-node bundle interlude'; cat second.crt; } > bundle-text.crt
+            compose "$bundle" empty bundle-text.out bundle-text.crt
+            [ "$rc" = 0 ] || fail "a bundle file with text in front of and between its certificates must be trusted, not exit $rc"
+            grep -q -x -F -- \
+              "trusting bundle-text.crt certificate 1: subject=CN=plexsphere-node check CA sha256 Fingerprint=''${fingerprint#*=}" \
+              stdout || fail "stdout must name the first certificate of bundle-text.crt"
+            grep -q -x -F -- "trusting bundle-text.crt certificate 2: $secondLine" stdout ||
+              fail "stdout must name the second certificate of bundle-text.crt"
+            openssl verify -no_check_time -CAfile bundle-text.out ca.crt second.crt ||
+              fail "the composed bundle must verify both certificates of bundle-text.crt"
+            [ "$(grep -c -e '-----BEGIN ' bundle-text.out)" = $((systemCount + 2)) ] ||
+              fail "the composed bundle must hold the system bundle and both certificates of bundle-text.crt"
+            if grep -q -F 'plexsphere-node bundle' bundle-text.out; then
+              fail "the text around the certificates of bundle-text.crt must not be appended"
+            fi
+
+            cp ca.crt "$(printf 'k\033[2Jl').crt"
+            compose "$bundle" empty escaped.out "$(printf 'k\033[2Jl').crt"
+            grep -q -F -- "trusting \$'k\\E[2Jl.crt' certificate 1: " stdout ||
+              fail "the name of a trusted bundle file must be printed with its control bytes escaped"
+            cat stdout stderr > escaped.log
+            echo 'not a certificate' > "$(printf 'm\033[2Jn').crt"
+            compose "$bundle" empty escaped.out "$(printf 'm\033[2Jn').crt"
+            grep -q -F -- "skipping \$'m\\E[2Jn.crt': " stderr ||
+              fail "the name of a skipped bundle file must be printed with its control bytes escaped"
+            if LC_ALL=C grep -q '[^[:print:]]' escaped.log stdout stderr; then
+              fail "nothing printed about a bundle file may hold a byte outside printable ASCII"
+            fi
+
+            : > bundle-empty.crt
+            printf '\n \n' > bundle-blank.crt
+            for name in no-such-bundle bundle-empty bundle-blank; do
+              compose "$bundle" empty "$name.out" "$name.crt"
+              [ "$rc" = 0 ] || fail "$name.crt: no bundle must exit 0, not $rc"
+              if [ -s stdout ] || [ -s stderr ]; then
+                fail "$name.crt: no bundle must print no trusting and no skipping line"
+              fi
+              cmp "$bundle" "$name.out" || fail "$name.crt: the output must be the system bundle"
+            done
+
+            printf '\377\376\n' > bundle-bytes.crt
+            rc=0
+            LC_ALL=C.UTF-8 ${trust}/bin/plexsphere-ca-trust "$bundle" empty bundle-bytes.out bundle-bytes.crt > stdout 2> stderr || rc=$?
+            [ "$rc" = 1 ] || fail "a bundle file of bytes a UTF-8 locale cannot decode must be skipped with exit 1, not $rc"
+            grep -q -x -F -- "skipping bundle-bytes.crt: it must hold one or more PEM certificates and nothing else" stderr ||
+              fail "stderr must name bundle-bytes.crt as skipped"
+
             echo kept > kept.out
             cp kept.out kept.ref
             compose ./no-such-bundle mixed kept.out
@@ -1158,6 +1279,8 @@
 
             compose "$bundle" mixed
             [ "$rc" = 2 ] || fail "a wrong argument count must exit 2, not $rc"
+            compose "$bundle" empty five.out bundle.crt extra
+            [ "$rc" = 2 ] || fail "five arguments must exit 2, not $rc"
 
             touch $out
           '';
