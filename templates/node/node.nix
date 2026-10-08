@@ -24,6 +24,11 @@
   # https://api.plexsphere.com.
   # services.plexd.settings.api.base_url = "https://cp.example.test";
 
+  # CA certificates to trust beside the public ones, for a control plane
+  # whose TLS comes from a private CA. One PEM certificate per entry; in a
+  # git repository, git add the file as well.
+  # plexsphere.node.extraCACertificates = [ (builtins.readFile ./lab-ca.crt) ];
+
   # The nixpkgs release this node is installed under; leave it unchanged
   # after the install.
   system.stateVersion = "26.05";
