@@ -1463,7 +1463,11 @@
         # on an instance that boots without its token, its identity or its
         # CA. The module side is pinned by the names the README explains it
         # with: the unit k3s and plexd wait for, the virtio profile, the
-        # serial console and the composed bundle.
+        # serial console and the composed bundle. The plexsphere broker's
+        # document is pinned on both sides by the files the README explains
+        # it with: the bundle file and the link its join runs. The README
+        # also has to name the curl error its install step ends in, which an
+        # operator would otherwise read as a failure.
         # The README's first command after a boot is cloud-init status, which
         # resolves only because the image puts cloud-init on the PATH.
         image-docs-match-the-module =
@@ -1487,10 +1491,19 @@
                 '-smbios type=1,serial=ds=nocloud' \
                 cloud-localds \
                 'cloud-init status --wait' \
-                plexsphere.disk.biosBoot; do
+                plexsphere.disk.biosBoot \
+                /etc/plexd/ca.crt \
+                /usr/local/bin/plexd \
+                'curl: command not found'; do
               grep -q -F -- "$pattern" ${./README.md}
             done
-            for pattern in cloud-final.service qemu-guest.nix ttyS0 /run/plexsphere/ca-bundle.crt; do
+            for pattern in \
+                cloud-final.service \
+                qemu-guest.nix \
+                ttyS0 \
+                /run/plexsphere/ca-bundle.crt \
+                /etc/plexd/ca.crt \
+                /usr/local/bin/plexd; do
               grep -q -F -- "$pattern" ${./modules/image.nix}
             done
             touch $out
