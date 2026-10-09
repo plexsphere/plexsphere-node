@@ -1046,6 +1046,39 @@
             [ "x86_64-linux" "aarch64-linux" ])
           "the machine image must enable cloud-init with networkd and order k3s and plexd after cloud-final.service without wanting or requiring any cloud-init unit";
 
+        # The plexsphere broker's cloud-init document writes the control
+        # plane's URL, the Project and the Resource handle to
+        # /etc/plexd/environment, the file plexd's unit reads: if the image
+        # read another file, plexd would talk to the public endpoint and
+        # restart on project_id is required. The document's runcmd runs an
+        # install script that fetches plexd with curl into
+        # /usr/local/bin/plexd, then /usr/local/bin/plexd join. The path has
+        # to be a link to the pinned plexd plexd.service runs, and
+        # /usr/local/bin has to be read-only to cloud-final.service, or the
+        # script replaces the link with a binary nothing here verified:
+        # busybox's wget is on cloud-final's PATH whether curl is or not.
+        # curl has to stay off it, so the script ends in the error the
+        # README names. Nodes that are not the image receive no broker
+        # document, so they get no link.
+        image-runs-broker-documents = passIf "image-runs-broker-documents"
+          (lib.all
+            (system:
+              let
+                image = imageSystems.${system}.config;
+                broker = image.systemd.tmpfiles.settings."10-plexsphere-broker" or { };
+              in
+              image.systemd.services.plexd.serviceConfig.EnvironmentFile
+                == "-/etc/plexd/environment"
+              && (broker."/usr/local".d.mode or null) == "0755"
+              && (broker."/usr/local/bin".d.mode or null) == "0755"
+              && (broker."/usr/local/bin/plexd"."L+".argument or null)
+                == "${image.services.plexd.package}/bin/plexd"
+              && lib.elem "/usr/local/bin" (image.systemd.services.cloud-final.serviceConfig.ReadOnlyPaths or [ ])
+              && !(lib.any (p: lib.getName p == "curl") image.systemd.services.cloud-final.path))
+            [ "x86_64-linux" "aarch64-linux" ]
+            && !(defaultNode.config.systemd.tmpfiles.settings ? "10-plexsphere-broker"))
+          "the machine image must read /etc/plexd/environment, link /usr/local/bin/plexd to services.plexd.package in 0755 directories, keep /usr/local/bin read-only to cloud-final, and keep curl off cloud-final's PATH; other nodes must get no link";
+
         # The image trusts whatever plexsphere-ca-trust appends, system-wide
         # and for every name, so the script is run here on the files an
         # operator gets wrong: a key pasted along, two certificates, text

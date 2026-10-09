@@ -101,11 +101,41 @@ in
   # otherwise start at network-online.target, the same point cloud-init
   # starts at, so k3s could register its Node object under the host name
   # from before cloud-init and plexd could start before
-  # /etc/plexd/bootstrap-token exists. Ordering only, never wants or
+  # /etc/plexd/bootstrap-token exists. On the plexsphere broker's document,
+  # the runcmd's plexd join has run by the time plexd starts, so plexd
+  # loads the identity join saved. Ordering only, never wants or
   # requires: when no datasource is found, cloud-init.service fails,
   # cloud-final.service never starts, and k3s and plexd still have to come up.
   systemd.services.k3s.after = [ "cloud-final.service" ];
   systemd.services.plexd.after = [ "cloud-final.service" ];
+
+  # The broker's runcmd first runs /etc/plexd/install-plexd.sh, which
+  # fetches plexd with curl into /usr/local/bin/plexd, and then
+  # /usr/local/bin/plexd join. curl is not on cloud-init's PATH, so the
+  # script stops at its first curl with "curl: command not found" before
+  # it writes anything, and the link makes join run the pinned plexd that
+  # plexd.service runs, so one binary writes and reads /var/lib/plexd. L+
+  # replaces whatever sits at the path on every boot.
+  systemd.tmpfiles.settings."10-plexsphere-broker" = {
+    "/usr/local".d = {
+      mode = "0755";
+      user = "root";
+      group = "root";
+    };
+    "/usr/local/bin".d = {
+      mode = "0755";
+      user = "root";
+      group = "root";
+    };
+    "/usr/local/bin/plexd"."L+".argument = "${config.services.plexd.package}/bin/plexd";
+  };
+
+  # The missing curl alone does not keep the link: busybox is on
+  # cloud-init's PATH too, and its wget fetches over https. /usr/local/bin
+  # is read-only to cloud-final.service, which runs runcmd, so whatever
+  # downloader the script finds, it cannot replace the link with a binary
+  # nothing in this repository verified, which join would then run as root.
+  systemd.services.cloud-final.serviceConfig.ReadOnlyPaths = [ "/usr/local/bin" ];
 
   # The image is one disk for every instance, so no private CA can be built
   # into the bundle in its store: an instance trusts the certificates its
