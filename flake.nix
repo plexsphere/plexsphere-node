@@ -1505,8 +1505,10 @@
         # serial console and the composed bundle. The plexsphere broker's
         # document is pinned on both sides by the files the README explains
         # it with: the bundle file and the link its join runs. The README
-        # also has to name the curl error its install step ends in, which an
-        # operator would otherwise read as a failure.
+        # also has to name the errors its install script and its plexd
+        # install end in, which an operator would otherwise read as
+        # failures, and the systemctl entry that leaves the image's own
+        # plexd.service running.
         # The README's first command after a boot is cloud-init status, which
         # resolves only because the image puts cloud-init on the PATH.
         image-docs-match-the-module =
@@ -1533,7 +1535,9 @@
                 plexsphere.disk.biosBoot \
                 /etc/plexd/ca.crt \
                 /usr/local/bin/plexd \
-                'curl: command not found'; do
+                'curl: command not found' \
+                'create destination binary: open /usr/local/bin/plexd: read-only file system' \
+                'systemctl enable --now --no-block plexd'; do
               grep -q -F -- "$pattern" ${./README.md}
             done
             for pattern in \
