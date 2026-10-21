@@ -92,11 +92,13 @@ The image boots on the cloud-init document the plexsphere Provisioning Broker re
 - **`/etc/plexd/environment`** is the file plexd reads, as in the user-data above. The document writes `PLEXD_API`, `PLEXD_PROJECT_ID`, `PLEXD_RESOURCE_HANDLE` and `PLEXD_BOOTSTRAP_TOKEN_FILE` there.
 - **`/etc/plexd/install-plexd.sh`**, the first runcmd entry, ends with `curl: command not found`. That is expected: the image ships plexd and downloads nothing, so cloud-init has no curl, and `/usr/local/bin` is read-only to runcmd.
 - **`/usr/local/bin/plexd join`**, the second runcmd entry, runs the image's own plexd through a link, registers the node and prints `node_id:` and `mesh_ip:`.
+- **`/usr/local/bin/plexd install`**, the third runcmd entry, ends with `Error: plexd install: packaging: create destination binary: open /usr/local/bin/plexd: read-only file system` and its usage text. That is expected too: on other images it installs plexd's own unit, but here it stops at copying itself through the link into the read-only Nix store, before it writes a config or a unit.
+- **`systemctl enable --now --no-block plexd`**, the fourth runcmd entry, finds the image's plexd.service already enabled and changes nothing. The boot starts the unit after cloud-init has finished, as it does without the broker. It loads the identity `join` saved, so the node `join` registered is the one that heartbeats, and it is the only plexd agent on the image.
 - **`/etc/plexd/ca.crt`**, written when the control plane has a CA bundle configured, is trusted system-wide (see [Control plane behind a private CA](#control-plane-behind-a-private-ca)). The document's `ca_certs` key is skipped on NixOS.
 
-Both runcmd entries print to `journalctl -u cloud-final` and to the serial console. The image's cloud-init writes no `/var/log/cloud-init-output.log`.
+All four runcmd entries print to `journalctl -u cloud-final` and to the serial console. The image's cloud-init writes no `/var/log/cloud-init-output.log`. A document the broker rendered before it gained the last two entries ends after `join`, and the image boots on it the same way.
 
-When `join` fails, because the control plane stays unreachable for the 5 minutes `join` retries, its certificate is not trusted, or it refuses the token, `cloud-init status` reports `error`. plexd.service starts anyway and registers on its own with `/etc/plexd/environment`, as long as the control plane has not consumed the token.
+When `join` fails, because the control plane stays unreachable for the 5 minutes `join` retries, its certificate is not trusted, or it refuses the token, its error is in that journal and not in `cloud-init status`: the status follows the last runcmd entry, which succeeds, and reads `status: done`. With an older document, whose last entry is `join`, it reads `error`. plexd.service starts anyway and registers on its own with `/etc/plexd/environment`, as long as the control plane has not consumed the token.
 
 ### Boot it locally with KVM
 
