@@ -524,14 +524,17 @@
         # one it pinned at /etc/plexd/session-signing-key, and both are only
         # a trust anchor while plexd cannot write /etc. ConfigurationDirectory
         # or ReadWritePaths would reopen it to plexd without touching
-        # ProtectSystem, so all three are pinned.
+        # ProtectSystem, so all three are pinned. The one write grant is the
+        # bootstrap token file, which plexd empties after registering because
+        # it cannot unlink it, and it is pinned exactly: a second entry could
+        # reopen an anchor, and a missing one leaves the spent token on disk.
         plexd-session-anchor-read-only =
           let service = defaultNode.config.systemd.services.plexd.serviceConfig; in
           passIf "plexd-session-anchor-read-only"
             (lib.elem (service.ProtectSystem or null) [ "full" "strict" ]
-              && !(service ? ReadWritePaths)
+              && (service.ReadWritePaths or null) == [ "-/etc/plexd/bootstrap-token" ]
               && !(service ? ConfigurationDirectory))
-            "plexd's unit must keep /etc read-only, or plexd could replace the session helper's pinned signing key at /etc/plexd/session-signing-key";
+            "plexd's unit must keep /etc read-only apart from /etc/plexd/bootstrap-token, which it must be able to empty; any other write grant could replace the session helper's pinned signing key at /etc/plexd/session-signing-key";
 
         # The sibling provisioning paths of issues #3 and #5 inherit this
         # module, so a later relaxation of either half of the posture would
