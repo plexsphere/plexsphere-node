@@ -536,6 +536,20 @@
               && !(service ? ConfigurationDirectory))
             "plexd's unit must keep /etc read-only apart from /etc/plexd/bootstrap-token, which it must be able to empty; any other write grant could replace the session helper's pinned signing key at /etc/plexd/session-signing-key";
 
+        # plexd creates its hooks directory itself and stops watching for
+        # good when it cannot, and /etc is read-only to it, so without this
+        # entry no hook is ever loaded. An age would let tmpfiles delete
+        # hooks. That plexd cannot write the directory is pinned by the exact
+        # ReadWritePaths above.
+        plexd-hooks-dir-created =
+          let hooks = defaultNode.config.systemd.tmpfiles.settings."10-plexd"."/etc/plexd/hooks".d or { }; in
+          passIf "plexd-hooks-dir-created"
+            ((hooks.mode or null) == "0755"
+              && (hooks.user or null) == "root"
+              && (hooks.group or null) == "root"
+              && (hooks.age or "-") == "-")
+            "the plexd module must create /etc/plexd/hooks as 0755 root:root through tmpfiles, with no age, or plexd's hook watcher stops on a read-only /etc and loads no hooks";
+
         # The sibling provisioning paths of issues #3 and #5 inherit this
         # module, so a later relaxation of either half of the posture would
         # reach them without a word: an sshd setting flipped back would carry

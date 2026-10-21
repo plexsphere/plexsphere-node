@@ -107,12 +107,25 @@ in
         { from = 32768; to = 60999; }
       ];
 
-      # The same directory holds the out-of-band bootstrap token and
-      # environment file; NixOS would otherwise create it world-readable.
-      systemd.tmpfiles.settings."10-plexd"."/etc/plexd".d = {
-        user = "root";
-        group = "root";
-        mode = "0750";
+      systemd.tmpfiles.settings."10-plexd" = {
+        # The same directory holds the out-of-band bootstrap token and
+        # environment file; NixOS would otherwise create it world-readable.
+        "/etc/plexd".d = {
+          user = "root";
+          group = "root";
+          mode = "0750";
+        };
+
+        # plexd creates its hooks directory itself and stops watching for
+        # good when it cannot ("hook watcher stopped"), and the unit below
+        # keeps /etc read-only, so the node creates it, as plexd install does
+        # on other hosts. plexd gets no write access to it: a hook runs with
+        # plexd's privileges. No age, so tmpfiles never cleans hooks out.
+        "/etc/plexd/hooks".d = {
+          user = "root";
+          group = "root";
+          mode = "0755";
+        };
       };
 
       systemd.services.plexd = {

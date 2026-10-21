@@ -427,6 +427,10 @@ plexd reads its registration token from `/etc/plexd/bootstrap-token`, or from `P
 
 After registering, plexd empties the token file, the only file under `/etc` its unit lets it write. On the broker path, `plexd join` runs outside that unit and deletes the file. plexd cleans up only when it registers, so a node that registered under plexd v0.8.0 logged `failed to delete token file` and keeps its spent token after a rebuild onto v0.9.0 or later: remove it once with `rm -f /etc/plexd/bootstrap-token`.
 
+### Hook scripts
+
+plexd offers each executable script in `/etc/plexd/hooks/` to the control plane as a hook and runs it when the control plane asks. The node creates the directory at every boot as `0755 root:root`. plexd's unit cannot write there, because a hook runs with plexd's privileges, so hooks are written as root: through cloud-init `write_files` on the machine image, or over SSH. The script format is in plexd's guide, [Creating Custom Hook Scripts](https://github.com/plexsphere/plexd/blob/v0.9.0/docs/how-to/custom-hook-scripts.md).
+
 ### Control plane behind a private CA
 
 plexd, k3s and curl verify the control plane against the system CA bundle, `/etc/ssl/certs/ca-certificates.crt`. plexd has no CA option of its own, so a control plane whose TLS certificate comes from a private CA has to be trusted through that bundle. `api.tls_insecure_skip_verify` is no way around it: it hands the node, and its bootstrap token, to anyone on the path.
