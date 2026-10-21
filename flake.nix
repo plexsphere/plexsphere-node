@@ -1069,8 +1069,9 @@
         # read another file, plexd would talk to the public endpoint and
         # restart on project_id is required. The document's runcmd runs an
         # install script that fetches plexd with curl into
-        # /usr/local/bin/plexd, then /usr/local/bin/plexd join. The path has
-        # to be a link to the pinned plexd plexd.service runs, and
+        # /usr/local/bin/plexd, then /usr/local/bin/plexd join;
+        # image-keeps-its-own-plexd covers the two entries after it. The
+        # path has to be a link to the pinned plexd plexd.service runs, and
         # /usr/local/bin has to be read-only to cloud-final.service, or the
         # script replaces the link with a binary nothing here verified:
         # busybox's wget is on cloud-final's PATH whether curl is or not.
@@ -1095,6 +1096,27 @@
             [ "x86_64-linux" "aarch64-linux" ]
             && !(defaultNode.config.systemd.tmpfiles.settings ? "10-plexsphere-broker"))
           "the machine image must read /etc/plexd/environment, link /usr/local/bin/plexd to services.plexd.package in 0755 directories, keep /usr/local/bin read-only to cloud-final, and keep curl off cloud-final's PATH; other nodes must get no link";
+
+        # The broker's document ends its runcmd with /usr/local/bin/plexd
+        # install and systemctl enable --now --no-block plexd, which install
+        # and start plexd's own unit on other images. On the image, plexd
+        # install creates its directories and then copies itself to
+        # /usr/local/bin/plexd; the open follows the link into the store,
+        # and the read-only store fails it with EROFS before plexd install
+        # writes a config or a unit. plexd's own unit masks none of the k3s
+        # paths plexd.service hides, and with a writable store plexd
+        # install would open the pinned binary itself for writing. The
+        # image's unit has to be enabled on its own: systemctl enable then
+        # finds it enabled and changes nothing, and without wantedBy only
+        # the first boot's --now would start it.
+        image-keeps-its-own-plexd = passIf "image-keeps-its-own-plexd"
+          (lib.all
+            (system:
+              let image = imageSystems.${system}.config; in
+              lib.elem "ro" image.boot.nixStoreMountOpts
+              && lib.elem "multi-user.target" image.systemd.services.plexd.wantedBy)
+            [ "x86_64-linux" "aarch64-linux" ])
+          "the machine image must mount the Nix store read-only and enable plexd.service through multi-user.target, so that the broker document's plexd install fails before it writes a unit and its systemctl enable --now --no-block plexd only starts the image's own";
 
         # The image trusts whatever plexsphere-ca-trust appends, system-wide
         # and for every name, so the script is run here on the files an

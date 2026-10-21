@@ -103,7 +103,10 @@ in
   # from before cloud-init and plexd could start before
   # /etc/plexd/bootstrap-token exists. On the plexsphere broker's document,
   # the runcmd's plexd join has run by the time plexd starts, so plexd
-  # loads the identity join saved. Ordering only, never wants or
+  # loads the identity join saved. The document's last runcmd entry,
+  # systemctl enable --now --no-block plexd, only queues this start:
+  # blocking, it would wait for plexd, which waits for cloud-final.service,
+  # which runs it, and the boot would hang. Ordering only, never wants or
   # requires: when no datasource is found, cloud-init.service fails,
   # cloud-final.service never starts, and k3s and plexd still have to come up.
   systemd.services.k3s.after = [ "cloud-final.service" ];
@@ -115,7 +118,11 @@ in
   # script stops at its first curl with "curl: command not found" before
   # it writes anything, and the link makes join run the pinned plexd that
   # plexd.service runs, so one binary writes and reads /var/lib/plexd. L+
-  # replaces whatever sits at the path on every boot.
+  # replaces whatever sits at the path on every boot. The third entry,
+  # /usr/local/bin/plexd install, runs that binary as well and stops at
+  # copying itself to this path: the open follows the link into the
+  # read-only store and fails with EROFS before plexd install writes a
+  # config or a unit (image-keeps-its-own-plexd in flake.nix).
   systemd.tmpfiles.settings."10-plexsphere-broker" = {
     "/usr/local".d = {
       mode = "0755";
