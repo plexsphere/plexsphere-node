@@ -78,7 +78,7 @@ write_files:
 - **`/etc/plexd/environment`** sets `PLEXD_PROJECT_ID`, the UUID of the project the node registers into, and `PLEXD_RESOURCE_HANDLE`, the platform resource it binds to. Without either, plexd exits with `project_id is required` or `resource_handle is required` and restarts every 5 seconds. `PLEXD_API` is optional and points plexd at a control plane other than `https://api.plexsphere.com`.
 - **`/etc/plexsphere/ca-certificates/<name>.crt`** is optional: one CA certificate per file, trusted system-wide beside the public roots, for a control plane behind a private CA (see [Control plane behind a private CA](#control-plane-behind-a-private-ca)).
 
-The user-data stays readable while the instance runs; on OpenStack the metadata service hands it, token included, to any process on the instance, pods included. The token is one-time, and plexd deletes the file after registering. To keep the token out of the user-data, drop its `write_files` entry and write the file after the boot:
+The user-data stays readable while the instance runs; on OpenStack the metadata service hands it, token included, to any process on the instance, pods included. The token is one-time. After registering, plexd empties the file; it cannot delete it, because its unit keeps `/etc/plexd` read-only. To keep the token out of the user-data, drop its `write_files` entry and write the file after the boot:
 
 ```bash
 ssh root@<address> 'umask 077; cat > /etc/plexd/bootstrap-token' <<< "$PLEXD_BOOTSTRAP_TOKEN"
@@ -411,7 +411,7 @@ Flannel VXLAN is unauthenticated: whoever reaches `8472/udp` can inject frames i
 plexd serves the control plane's ssh sessions (`plexctl ssh`, the Console terminal) by default. It starts no shell itself: each shell or command runs in `plexd-session-helper@.service`, one root instance per connection to `plexd-session-helper.socket` (`/run/plexd-session-helper.sock`, `0600`), outside plexd's sandbox. Root is the only account on a node, so sessions log in as root.
 
 - To refuse ssh sessions and keep tcp sessions, set `services.plexd.settings.tunnel.ssh_sessions_enabled = false;`.
-- The helper verifies every session token again, against `services.plexd.sessionSigningPublicKey` when it is set. Otherwise, on its first run, it copies the Domain's key from `identity.json` to `/etc/plexd/session-signing-key` and trusts only that file afterwards. plexd's unit keeps `/etc` read-only, so plexd cannot replace either. Setting the option when the node is provisioned skips the trust-on-first-use step.
+- The helper verifies every session token again, against `services.plexd.sessionSigningPublicKey` when it is set. Otherwise, on its first run, it copies the Domain's key from `identity.json` to `/etc/plexd/session-signing-key` and trusts only that file afterwards. plexd's unit keeps `/etc` read-only apart from `/etc/plexd/bootstrap-token`, so plexd cannot replace either. Setting the option when the node is provisioned skips the trust-on-first-use step.
 - The helper does not follow a signing-key rotation. After the Domain rotates its key, or after the node registers with another Domain, the ssh login still succeeds, but every shell and command fails with `plexd: tunnel: session helper refused: token refused: tunnel: session token: signature does not verify against a trusted key`. Set `services.plexd.sessionSigningPublicKey` to the new key. Deleting the pin does not help: the next run pins the key from `identity.json` again, and plexd rewrites that file only when it registers.
 - A command run through the session, and every entry of a token's allowed commands, has to name its program by absolute path, for example `/run/current-system/sw/bin/uptime`. The helper runs it through `bash -c` with `PATH` set to the FHS directories, which are empty on NixOS apart from `/bin/sh`. An interactive shell is a login shell and gets the normal `PATH` from `/etc/profile`.
 - Sessions open no PAM session and leave no utmp or lastlog record. The helper logs to `journalctl -u 'plexd-session-helper@*'`.
@@ -424,6 +424,8 @@ plexd reads its registration token from `/etc/plexd/bootstrap-token`, or from `P
 - SSH takeover: `--extra-files` ([Bootstrap token and root password](#bootstrap-token-and-root-password))
 - live USB installer: prompt
 - existing NixOS machine: write the file yourself
+
+After registering, plexd empties the token file, the only file under `/etc` its unit lets it write. On the broker path, `plexd join` runs outside that unit and deletes the file. plexd cleans up only when it registers, so a node that registered under plexd v0.8.0 logged `failed to delete token file` and keeps its spent token after a rebuild onto v0.9.0 or later: remove it once with `rm -f /etc/plexd/bootstrap-token`.
 
 ### Control plane behind a private CA
 

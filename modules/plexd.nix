@@ -145,6 +145,18 @@ in
           NoNewPrivileges = true;
           ProtectSystem = "strict";
           ProtectHome = true;
+          # The session helper trusts config.yaml and the key it pins at
+          # /etc/plexd/session-signing-key only because plexd cannot write
+          # /etc, so the one path opened there is the bootstrap token file.
+          # plexd unlinks the spent token after registering, which fails with
+          # EROFS in the read-only /etc/plexd, and then empties the file
+          # instead. "-" skips the path when no token file exists at start,
+          # which would otherwise fail the unit with 226/NAMESPACE: the
+          # broker document's plexd join deletes the file before plexd
+          # starts, and a node given PLEXD_BOOTSTRAP_TOKEN never has one. A
+          # token written later is granted on the next start, as plexd up
+          # exits without one and Restart brings it back.
+          ReadWritePaths = [ "-/etc/plexd/bootstrap-token" ];
           # ProtectSystem only makes the hierarchy read-only, and a UID-0
           # process matches the owner class on k3s' 0600/0700 files, so
           # dropping DAC_OVERRIDE does not stop a read either. Masking the
@@ -183,8 +195,10 @@ in
           LockPersonality = true;
           SystemCallArchitectures = "native";
           SystemCallFilter = [ "@system-service" "~@obsolete" ];
-          # Create the runtime/state dirs instead of upstream's
-          # ReadWritePaths=/var/lib/plexd /var/run/plexd.
+          # Create the runtime and state dirs on every start instead of
+          # upstream's optional ReadWritePaths=-/var/lib/plexd -/var/run/plexd
+          # entries: neither a reboot's empty /run nor deregister --purge then
+          # leaves a path missing when systemd sets up the namespace.
           StateDirectory = "plexd";
           RuntimeDirectory = "plexd";
         };
