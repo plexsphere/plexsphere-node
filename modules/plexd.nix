@@ -190,7 +190,7 @@ in
         };
       };
 
-      # plexd v0.8.0 serves mediated ssh sessions but starts no shell itself:
+      # plexd serves mediated ssh sessions but starts no shell itself:
       # the sandbox above bounds it to CAP_NET_ADMIN and CAP_NET_RAW and hides
       # /home, so a process it forks cannot become the login user. It sends
       # each launch to this socket instead, where systemd starts one root

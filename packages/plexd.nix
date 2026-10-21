@@ -4,15 +4,15 @@
 # ELF patching is required.
 
 let
-  version = "0.8.0";
+  version = "0.9.0";
   sources = {
     x86_64-linux = fetchurl {
       url = "https://github.com/plexsphere/plexd/releases/download/v${version}/plexd-linux-amd64";
-      hash = "sha256-SrGqVLju7hvDD0lihlmbZ6+gpbluM4RNclXkw3sGBUs=";
+      hash = "sha256-KYAKSUwZCTpy4h5US1/qzLL+Yox3yLKQYFX2pYdwqGQ=";
     };
     aarch64-linux = fetchurl {
       url = "https://github.com/plexsphere/plexd/releases/download/v${version}/plexd-linux-arm64";
-      hash = "sha256-062cWDZdJWEYT5WFTwxYeDXonGKDZF7zHy2Uxbxkh4w=";
+      hash = "sha256-0vv00fQmkF0kl3Z9EuhJFTyaLZ/dwtLJn6VO/W0FjNc=";
     };
   };
 in
