@@ -379,7 +379,7 @@ This protects a leaked datastore, not a stolen disk: the key lives in `/var/lib/
 | `plexsphere.disk.device` | str | required | Disk the disko layout is applied to (disk module). Applying the layout wipes it; use a `/dev/disk/by-id/…` path. |
 | `plexsphere.disk.biosBoot` | bool | `false` | GRUB in hybrid BIOS/UEFI mode with a 1M BIOS boot partition, instead of UEFI-only systemd-boot (disk module, x86_64 only). The machine image sets it. |
 | `services.plexd.enable` | bool | `false` | Run plexd. The node profile sets it to `true`. |
-| `services.plexd.package` | package | plexd v0.9.0 release binary | The plexd package. |
+| `services.plexd.package` | package | plexd v0.16.0 release binary | The plexd package. |
 | `services.plexd.sessionSigningPublicKey` | nullOr str | `null` | The Domain's session-signing public key, 44 characters of standard base64, rendered to `tunnel.session_signing_public_key`. Unset, the session helper pins the key from `identity.json` on its first run. See [Mediated ssh sessions](#mediated-ssh-sessions). |
 | `services.plexd.settings` | YAML attrset | `{ api.base_url = "https://api.plexsphere.com"; }` | Rendered to `/etc/plexd/config.yaml`; host values override the preset. The file is in the world-readable Nix store, so no credentials. |
 
@@ -414,7 +414,7 @@ plexd serves the control plane's ssh sessions (`plexctl ssh`, the Console termin
 
 - To refuse ssh sessions and keep tcp sessions, set `services.plexd.settings.tunnel.ssh_sessions_enabled = false;`.
 - The helper verifies every session token again, against `services.plexd.sessionSigningPublicKey` when it is set. Otherwise, on its first run, it copies the Domain's key from `identity.json` to `/etc/plexd/session-signing-key` and trusts only that file afterwards. plexd's unit keeps `/etc` read-only apart from `/etc/plexd/bootstrap-token`, so plexd cannot replace either. Setting the option when the node is provisioned skips the trust-on-first-use step.
-- The helper does not follow a signing-key rotation. After the Domain rotates its key, or after the node registers with another Domain, the ssh login still succeeds, but every shell and command fails with `plexd: tunnel: session helper refused: token refused: tunnel: session token: signature does not verify against a trusted key`. Set `services.plexd.sessionSigningPublicKey` to the new key. Deleting the pin does not help: the next run pins the key from `identity.json` again, and plexd rewrites that file only when it registers.
+- The helper does not follow a signing-key rotation. After the Domain rotates its key, or after the node registers with another Domain, the ssh login still succeeds, but every shell and command fails with `plexd: tunnel: session helper refused: token refused: tunnel: session token: signature does not verify against a trusted key`. Set `services.plexd.sessionSigningPublicKey` to the new key; plexd logs each key it learns from a state pull as `installed signing key from state pull`, with its `public_key`. Without the option, deleting `/etc/plexd/session-signing-key` makes the next run pin the key plexd last wrote to `identity.json`, repeating the trust-on-first-use step. Delete it only once plexd no longer logs `signing key not persisted; retrying on the next pull`.
 - A command run through the session, and every entry of a token's allowed commands, has to name its program by absolute path, for example `/run/current-system/sw/bin/uptime`. The helper runs it through `bash -c` with `PATH` set to the FHS directories, which are empty on NixOS apart from `/bin/sh`. An interactive shell is a login shell and gets the normal `PATH` from `/etc/profile`.
 - Sessions open no PAM session and leave no utmp or lastlog record. The helper logs to `journalctl -u 'plexd-session-helper@*'`.
 
@@ -431,7 +431,7 @@ After registering, plexd empties the token file, the only file under `/etc` its 
 
 ### Hook scripts
 
-plexd offers each executable script in `/etc/plexd/hooks/` to the control plane as a hook and runs it when the control plane asks. The node creates the directory at every boot as `0755 root:root`. plexd's unit cannot write there, because a hook runs with plexd's privileges, so hooks are written as root: through cloud-init `write_files` on the machine image, or over SSH. The script format is in plexd's guide, [Creating Custom Hook Scripts](https://github.com/plexsphere/plexd/blob/v0.9.0/docs/how-to/custom-hook-scripts.md).
+plexd offers each executable script in `/etc/plexd/hooks/` to the control plane as a hook and runs it when the control plane asks. The node creates the directory at every boot as `0755 root:root`. plexd's unit cannot write there, because a hook runs with plexd's privileges, so hooks are written as root: through cloud-init `write_files` on the machine image, or over SSH. The script format is in plexd's guide, [Creating Custom Hook Scripts](https://github.com/plexsphere/plexd/blob/v0.16.0/docs/how-to/custom-hook-scripts.md).
 
 ### Control plane behind a private CA
 
@@ -485,3 +485,5 @@ cosign verify-blob \
 ```
 
 The `plexd-package-has-session-helper` check runs the pinned binary's `plexd session-helper --help`, so a release without the subcommand the session helper unit starts fails `nix flake check`.
+
+From v0.11.0 on, plexd installs a preshared key on every mesh edge whose key the control plane serves (`wireguard.edge_psk`, on by default). WireGuard needs the same key on both ends, so an edge between such a node and one running plexd v0.10.0 or older fails, direct and relayed. While nodes of a Domain still run an older plexd, set `services.plexd.settings.wireguard.edge_psk = false;` on the upgraded ones, and remove it once every node of the Domain runs v0.11.0 or later.
