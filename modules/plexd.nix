@@ -4,6 +4,13 @@ let
   cfg = config.services.plexd;
   yamlFormat = pkgs.formats.yaml { };
   configFile = yamlFormat.generate "plexd-config.yaml" cfg.settings;
+
+  # plexd reaches systemd-resolved through plexd-dbus-proxy below, never
+  # through the system bus itself. The proxy runs only where plexd's mesh
+  # resolver is on (dns.enabled unset means on) and a systemd-resolved
+  # exists for it to reach.
+  busProxySocket = "/run/plexd-dbus-proxy/system_bus_socket";
+  busProxy = (cfg.settings.dns.enabled or true) && config.services.resolved.enable;
 in
 {
   options.services.plexd = {
@@ -185,7 +192,9 @@ in
           # systemd's private socket, where StartTransientUnit spawns a fresh
           # root unit carrying none of these directives, or containerd's,
           # where a container with / bind-mounted reads the masked paths
-          # straight off the host. Mask those sockets too.
+          # straight off the host. Mask those sockets too. The system bus
+          # stays masked even though plexd registers its mesh resolver over
+          # D-Bus: it reaches systemd-resolved only through plexd-dbus-proxy.
           InaccessiblePaths = [
             "-/var/lib/rancher"
             "-/etc/rancher"
@@ -266,6 +275,70 @@ in
           StandardError = "journal";
           KillMode = "control-group";
         };
+      };
+    })
+
+    # plexd's mesh resolver registers the Domain's zones with
+    # systemd-resolved over D-Bus, on org.freedesktop.resolve1. The system
+    # bus would also hand this UID-0 unit, and every hook plexd runs,
+    # systemd1's StartTransientUnit, the escape the masks above close. So
+    # plexd gets a bus of its own: xdg-dbus-proxy forwards calls to
+    # org.freedesktop.resolve1 and nothing else (--filter --talk), every
+    # method of it included, and any other name looks absent. A
+    # later plexd that needs another bus service fails that way until the
+    # filter names it. plexd's D-Bus client dials DBUS_SYSTEM_BUS_ADDRESS.
+    #
+    # The proxy runs as root on purpose: the bus checks the proxy's
+    # credentials, not plexd's, and plexd authenticates to the proxy as
+    # UID 0. It needs no capability and speaks AF_UNIX only. No wantedBy:
+    # plexd's wants starts it. No start limit, for the reason given on the
+    # plexd unit. While the proxy or systemd-resolved is down, plexd logs
+    # "mesh dns not registered, systemd-resolved is not usable" and tries
+    # again on its next state pull. Ordering plexd after both makes its
+    # stop revert the registration before either goes down.
+    (lib.mkIf (cfg.enable && busProxy) {
+      systemd.services.plexd-dbus-proxy = {
+        description = "D-Bus proxy that exposes only systemd-resolved to plexd";
+        requires = [ "dbus.socket" ];
+        after = [ "dbus.socket" "dbus.service" ];
+        startLimitIntervalSec = 0;
+        serviceConfig = {
+          Type = "simple";
+          ExecStart = "${pkgs.xdg-dbus-proxy}/bin/xdg-dbus-proxy unix:path=/run/dbus/system_bus_socket ${busProxySocket} --filter --talk=org.freedesktop.resolve1";
+          Restart = "always";
+          RestartSec = "5s";
+          RuntimeDirectory = "plexd-dbus-proxy";
+          RuntimeDirectoryMode = "0700";
+          UMask = "0077";
+          CapabilityBoundingSet = "";
+          NoNewPrivileges = true;
+          ProtectSystem = "strict";
+          ProtectHome = true;
+          PrivateTmp = true;
+          PrivateDevices = true;
+          PrivateNetwork = true;
+          ProtectProc = "invisible";
+          ProtectKernelTunables = true;
+          ProtectKernelModules = true;
+          ProtectKernelLogs = true;
+          ProtectControlGroups = true;
+          ProtectClock = true;
+          ProtectHostname = true;
+          RestrictAddressFamilies = [ "AF_UNIX" ];
+          RestrictNamespaces = true;
+          RestrictRealtime = true;
+          RestrictSUIDSGID = true;
+          LockPersonality = true;
+          MemoryDenyWriteExecute = true;
+          SystemCallArchitectures = "native";
+          SystemCallFilter = [ "@system-service" "~@privileged @resources" ];
+        };
+      };
+
+      systemd.services.plexd = {
+        environment.DBUS_SYSTEM_BUS_ADDRESS = "unix:path=${busProxySocket}";
+        wants = [ "plexd-dbus-proxy.service" ];
+        after = [ "plexd-dbus-proxy.service" "systemd-resolved.service" ];
       };
     })
   ];

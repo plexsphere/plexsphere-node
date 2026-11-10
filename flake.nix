@@ -511,6 +511,89 @@
               && !(lib.any (lib.hasPrefix "--resolv-conf=") ownStack))
             "k3s must get --resolv-conf=/run/systemd/resolve/resolv.conf beside --secrets-encryption on a server and alone on an agent whenever systemd-resolved runs, and no --resolv-conf flag without it";
 
+        # plexd reaches systemd-resolved through plexd-dbus-proxy, so the
+        # proxy's filter is all that stands between this UID-0 unit and
+        # systemd1's StartTransientUnit: exactly one --talk, for
+        # org.freedesktop.resolve1, and no flag that widens it. plexd has to
+        # be pointed at the proxy and ordered after it and resolved, the
+        # system bus has to stay masked, and no mask may cover the proxy's
+        # socket. Where the resolver is off or no resolved runs, neither the
+        # proxy nor the address may exist.
+        plexd-resolver-bus-filtered =
+          let
+            socket = "/run/plexd-dbus-proxy/system_bus_socket";
+            node = defaultNode.config;
+            proxy = node.systemd.services.plexd-dbus-proxy.serviceConfig;
+            plexd = node.systemd.services.plexd;
+            args = lib.splitString " " proxy.ExecStart;
+            flagCount = prefix: lib.length (lib.filter (lib.hasPrefix prefix) args);
+            masks = map (lib.removePrefix "-") plexd.serviceConfig.InaccessiblePaths;
+            withoutProxy = host:
+              !(host.config.systemd.services ? plexd-dbus-proxy)
+              && !(host.config.systemd.services.plexd.environment ? DBUS_SYSTEM_BUS_ADDRESS);
+          in
+          passIf "plexd-resolver-bus-filtered"
+            (lib.hasInfix "/bin/xdg-dbus-proxy unix:path=/run/dbus/system_bus_socket ${socket} --filter --talk=org.freedesktop.resolve1" proxy.ExecStart
+              && flagCount "--talk=" == 1
+              && lib.all (flag: flagCount flag == 0)
+                [ "--own=" "--see=" "--call=" "--broadcast=" "--sloppy-names" "--log" ]
+              && proxy.CapabilityBoundingSet == ""
+              && proxy.RestrictAddressFamilies == [ "AF_UNIX" ]
+              && (plexd.environment.DBUS_SYSTEM_BUS_ADDRESS or null) == "unix:path=${socket}"
+              && lib.elem "plexd-dbus-proxy.service" plexd.wants
+              && lib.all (unit: lib.elem unit plexd.after)
+                [ "plexd-dbus-proxy.service" "systemd-resolved.service" ]
+              && lib.elem "/run/dbus" masks
+              && !(lib.any (m: m == "/run" || m == "/run/plexd-dbus-proxy" || lib.hasPrefix "${m}/" socket) masks)
+              && withoutProxy (evalNode [ hostName sshKey { services.plexd.settings.dns.enabled = false; } ])
+              && withoutProxy (evalNode [ hostName sshKey { networking.useNetworkd = false; } ]))
+            "plexd must reach systemd-resolved only through plexd-dbus-proxy, whose xdg-dbus-proxy filter talks to org.freedesktop.resolve1 alone, with the system bus still masked; without dns or systemd-resolved there must be no proxy and no DBUS_SYSTEM_BUS_ADDRESS";
+
+        # systemd-resolved reaches plexd's resolver on <mesh IP>:5354 over
+        # lo, which the firewall accepts, and plexd answers no other host.
+        # Opening the port would hand mesh peers or attached networks a
+        # resolver meant for this node only.
+        plexd-resolver-port-closed =
+          let
+            firewall = defaultNode.config.networking.firewall;
+            mesh = firewall.interfaces.plexd0 or { };
+          in
+          passIf "plexd-resolver-port-closed"
+            (!(lib.any (lib.elem 5354) [
+              firewall.allowedTCPPorts
+              firewall.allowedUDPPorts
+              (mesh.allowedTCPPorts or [ ])
+              (mesh.allowedUDPPorts or [ ])
+            ]))
+            "plexd's mesh resolver port 5354 must be opened on no interface; systemd-resolved reaches it over lo";
+
+        # The README's Mesh DNS section tells an operator which unit, socket
+        # and filter to look at and which options turn things off. Nothing
+        # but agreement ties those strings to the modules, so both sides are
+        # pinned by the names the README explains them with.
+        mesh-dns-docs-match-the-module =
+          pkgs.runCommand "mesh-dns-docs-match-the-module" { } ''
+            for pattern in \
+                plexd-dbus-proxy \
+                /run/plexd-dbus-proxy/system_bus_socket \
+                --talk=org.freedesktop.resolve1 \
+                'networking.useNetworkd = false;' \
+                --resolv-conf=/run/systemd/resolve/resolv.conf \
+                'services.plexd.settings.dns.enabled = false;' \
+                'services.plexd.settings.actions.rollouts_enabled = false;' \
+                'mesh dns registered with systemd-resolved'; do
+              grep -q -F -- "$pattern" ${./README.md}
+            done
+            for pattern in \
+                plexd-dbus-proxy \
+                /run/plexd-dbus-proxy/system_bus_socket \
+                --talk=org.freedesktop.resolve1; do
+              grep -q -F -- "$pattern" ${./modules/plexd.nix}
+            done
+            grep -q -F -- --resolv-conf=/run/systemd/resolve/resolv.conf ${./modules/node.nix}
+            touch $out
+          '';
+
         # plexd refuses to start on a malformed session_signing_public_key and
         # restarts on it forever, so the option has to turn every shape plexd
         # rejects into an evaluation error: no padding, the URL-safe
