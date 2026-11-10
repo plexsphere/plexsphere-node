@@ -379,7 +379,7 @@ This protects a leaked datastore, not a stolen disk: the key lives in `/var/lib/
 | `plexsphere.disk.device` | str | required | Disk the disko layout is applied to (disk module). Applying the layout wipes it; use a `/dev/disk/by-id/…` path. |
 | `plexsphere.disk.biosBoot` | bool | `false` | GRUB in hybrid BIOS/UEFI mode with a 1M BIOS boot partition, instead of UEFI-only systemd-boot (disk module, x86_64 only). The machine image sets it. |
 | `services.plexd.enable` | bool | `false` | Run plexd. The node profile sets it to `true`. |
-| `services.plexd.package` | package | plexd v0.16.0 release binary | The plexd package. |
+| `services.plexd.package` | package | plexd v0.29.0 release binary | The plexd package. |
 | `services.plexd.sessionSigningPublicKey` | nullOr str | `null` | The Domain's session-signing public key, 44 characters of standard base64, rendered to `tunnel.session_signing_public_key`. Unset, the session helper pins the key from `identity.json` on its first run. See [Mediated ssh sessions](#mediated-ssh-sessions). |
 | `services.plexd.settings` | YAML attrset | `{ api.base_url = "https://api.plexsphere.com"; }` | Rendered to `/etc/plexd/config.yaml`; host values override the preset. The file is in the world-readable Nix store, so no credentials. |
 
@@ -390,10 +390,10 @@ The NixOS firewall stays on. The node opens:
 | Port | Interface | For |
 |---|---|---|
 | `51820/udp` (`services.plexd.settings.wireguard.listen_port`) | all | WireGuard handshakes from mesh peers |
-| `32768-60999/tcp` | `plexd0` (`services.plexd.settings.wireguard.interface_name`) | remote sessions from the control plane |
+| `32768-60999/tcp` | `plexd0` (`services.plexd.settings.wireguard.interface_name`) | tcp sessions from the control plane |
 | `6443/tcp`, `10250/tcp` | `cni0`, `flannel.1` | apiserver and kubelet, for pods |
 
-- The session range is the kernel's ephemeral port range and is open to every mesh peer. A tcp session's forward is unauthenticated, so the first peer to connect takes it; an ssh session's listener takes the session token as its password. Any other service listening on an ephemeral port on the mesh IP or on `0.0.0.0` is reachable by every peer. A host that changes `net.ipv4.ip_local_port_range` has to open its own range.
+- The session range is the kernel's ephemeral port range and is open to every mesh peer. A tcp session's forward is unauthenticated, so the first peer to connect takes it. ssh sessions open no port: plexd opens each of their connections to the control plane over HTTPS. Any other service listening on an ephemeral port on the mesh IP or on `0.0.0.0` is reachable by every peer. A host that changes `net.ipv4.ip_local_port_range` has to open its own range.
 - The CNI interfaces are deliberately not trusted, which would expose sshd and everything else on `0.0.0.0` to every pod. Open further host ports for workloads explicitly.
 - plexd's nftables table only enforces mesh policy on forwarded traffic; it is no host packet filter. Its health endpoints (`/healthz`, `/readyz`) listen on `127.0.0.1:9101` and are not opened. The bridge features (relay, user access, site-to-site) are off by default and need their own ports when enabled.
 
@@ -431,7 +431,11 @@ After registering, plexd empties the token file, the only file under `/etc` its 
 
 ### Hook scripts
 
-plexd offers each executable script in `/etc/plexd/hooks/` to the control plane as a hook and runs it when the control plane asks. The node creates the directory at every boot as `0755 root:root`. plexd's unit cannot write there, because a hook runs with plexd's privileges, so hooks are written as root: through cloud-init `write_files` on the machine image, or over SSH. The script format is in plexd's guide, [Creating Custom Hook Scripts](https://github.com/plexsphere/plexd/blob/v0.16.0/docs/how-to/custom-hook-scripts.md).
+plexd offers each executable script in `/etc/plexd/hooks/` to the control plane as a hook and runs it when the control plane asks. The node creates the directory at every boot as `0755 root:root`. plexd's unit cannot write there, because a hook runs with plexd's privileges, so hooks are written as root: through cloud-init `write_files` on the machine image, or over SSH. The script format is in plexd's guide, [Creating Custom Hook Scripts](https://github.com/plexsphere/plexd/blob/v0.29.0/docs/how-to/custom-hook-scripts.md).
+
+plexd runs a hook only when the script, and its sidecar when there is one, is a regular file owned by root that no group or other user can write, and resolves inside the hooks directory. A hook placed through `environment.etc` without a `mode` is a link into the Nix store and is refused; with `mode = "0755";` NixOS copies the file instead.
+
+The control plane can also roll a hook out to the node, which plexd does by default since v0.28.0. plexd fetches the Domain-signed version the state pull names, checks it against the pull's checksum, writes it to `/var/lib/plexd/hooks` and runs it like a hand-placed hook: as root inside plexd's sandbox, with its capabilities (`CAP_NET_ADMIN`, `CAP_NET_RAW`) and its masked paths. A hook of the same name in `/etc/plexd/hooks/` blocks the rollout. To refuse every rolled-out hook, set `services.plexd.settings.actions.rollouts_enabled = false;`, and plexd removes the ones it installed at its next start.
 
 ### Control plane behind a private CA
 
@@ -487,3 +491,9 @@ cosign verify-blob \
 The `plexd-package-has-session-helper` check runs the pinned binary's `plexd session-helper --help`, so a release without the subcommand the session helper unit starts fails `nix flake check`.
 
 From v0.11.0 on, plexd installs a preshared key on every mesh edge whose key the control plane serves (`wireguard.edge_psk`, on by default). WireGuard needs the same key on both ends, so an edge between such a node and one running plexd v0.10.0 or older fails, direct and relayed. While nodes of a Domain still run an older plexd, set `services.plexd.settings.wireguard.edge_psk = false;` on the upgraded ones, and remove it once every node of the Domain runs v0.11.0 or later.
+
+Moving to v0.29.0:
+
+- ssh sessions need a control plane that asks plexd to open each connection ([plexsphere/plexsphere#928](https://github.com/plexsphere/plexsphere/issues/928)). Behind an older control plane no ssh login succeeds, and there is no fallback listener on the mesh, so upgrade the control plane first.
+- With `wireguard.mtu` unset or `0`, plexd measures the uplink's path MTU at start and every 10 minutes and sizes `plexd0` to it minus 80 bytes, between 1280 and 1420. A positive value pins the MTU and turns the measurement off.
+- Rolled-out hooks are on (see [Hook scripts](#hook-scripts)).
