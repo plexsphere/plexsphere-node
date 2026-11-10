@@ -398,6 +398,7 @@ The NixOS firewall stays on. The node opens:
 - The session range is the kernel's ephemeral port range and is open to every mesh peer. A tcp session's forward is unauthenticated, so the first peer to connect takes it. ssh sessions open no port: plexd opens each of their connections to the control plane over HTTPS. Any other service listening on an ephemeral port on the mesh IP or on `0.0.0.0` is reachable by every peer. A host that changes `net.ipv4.ip_local_port_range` has to open its own range.
 - The CNI interfaces are deliberately not trusted, which would expose sshd and everything else on `0.0.0.0` to every pod. Open further host ports for workloads explicitly.
 - plexd's nftables table only enforces mesh policy on forwarded traffic; it is no host packet filter. Its health endpoints (`/healthz`, `/readyz`) listen on `127.0.0.1:9101` and are not opened. The bridge features (relay, user access, site-to-site) are off by default and need their own ports when enabled.
+- plexd's mesh resolver on `<mesh IP>:5354` is not opened: systemd-resolved reaches it over `lo`, and plexd answers no other host (see [Mesh DNS](#mesh-dns)).
 
 A single-node server needs nothing more. To join further nodes, open the cluster ports on the interface facing them:
 
@@ -419,6 +420,29 @@ plexd serves the control plane's ssh sessions (`plexctl ssh`, the Console termin
 - The helper does not follow a signing-key rotation. After the Domain rotates its key, or after the node registers with another Domain, the ssh login still succeeds, but every shell and command fails with `plexd: tunnel: session helper refused: token refused: tunnel: session token: signature does not verify against a trusted key`. Set `services.plexd.sessionSigningPublicKey` to the new key; plexd logs each key it learns from a state pull as `installed signing key from state pull`, with its `public_key`. Without the option, deleting `/etc/plexd/session-signing-key` makes the next run pin the key plexd last wrote to `identity.json`, repeating the trust-on-first-use step. Delete it only once plexd no longer logs `signing key not persisted; retrying on the next pull`.
 - A command run through the session, and every entry of a token's allowed commands, has to name its program by absolute path, for example `/run/current-system/sw/bin/uptime`. The helper runs it through `bash -c` with `PATH` set to the FHS directories, which are empty on NixOS apart from `/bin/sh`. An interactive shell is a login shell and gets the normal `PATH` from `/etc/profile`.
 - Sessions open no PAM session and leave no utmp or lastlog record. The helper logs to `journalctl -u 'plexd-session-helper@*'`.
+
+### Mesh DNS
+
+plexd answers its Domain's mesh names from a resolver on `<mesh IP>:5354` and registers the Domain's zones and its Project's search domain with systemd-resolved on `plexd0`. Every node runs systemd-networkd and systemd-resolved, so a program on the node resolves a Node's fully qualified name, and a Node of its own Project by host name alone, through the normal resolver, and every other name as before.
+
+plexd reaches systemd-resolved through `plexd-dbus-proxy`, an xdg-dbus-proxy on `/run/plexd-dbus-proxy/system_bus_socket` that passes `--talk=org.freedesktop.resolve1` and nothing else. The system bus itself stays masked in plexd's unit, so neither plexd nor a hook it runs reaches systemd's own interface.
+
+To check a node:
+
+```bash
+resolvectl status plexd0      # DNS server <mesh IP>:5354, the zones as ~domains
+resolvectl query <host>       # a Node of the same Project, by host name
+journalctl -u plexd | grep 'mesh dns'
+journalctl -u plexd-dbus-proxy
+```
+
+plexd logs `mesh dns listening` once it binds and `mesh dns registered with systemd-resolved` once systemd-resolved took the zones.
+
+- `mesh dns not registered, systemd-resolved is not usable` means plexd could not reach systemd-resolved, because `plexd-dbus-proxy` or systemd-resolved is down. plexd keeps answering on `<mesh IP>:5354` and tries again on every state pull until it registers.
+- plexd owns the resolver settings of `plexd0` and reverts the link when it stops. Set nothing on that link by hand.
+- Pods do not resolve mesh names: plexd answers the node itself only, and k3s runs with `--resolv-conf=/run/systemd/resolve/resolv.conf`, systemd-resolved's list of uplink servers.
+- To turn the resolver off, set `services.plexd.settings.dns.enabled = false;`. plexd then binds no listener, and the node runs no `plexd-dbus-proxy`.
+- A host that sets `networking.useNetworkd = false;` gets no systemd-resolved from this module. Without one of its own it runs no `plexd-dbus-proxy`, and plexd answers on `<mesh IP>:5354` unregistered (see [Existing NixOS machine](#existing-nixos-machine)).
 
 ### Bootstrap token
 
@@ -499,5 +523,6 @@ Moving to v0.29.0:
 - ssh sessions need a control plane that asks plexd to open each connection ([plexsphere/plexsphere#928](https://github.com/plexsphere/plexsphere/issues/928)). Behind an older control plane no ssh login succeeds, and there is no fallback listener on the mesh, so upgrade the control plane first.
 - With `wireguard.mtu` unset or `0`, plexd measures the uplink's path MTU at start and every 10 minutes and sizes `plexd0` to it minus 80 bytes, between 1280 and 1420. A positive value pins the MTU and turns the measurement off.
 - Rolled-out hooks are on (see [Hook scripts](#hook-scripts)).
+- plexd answers the Domain's mesh names and registers them with systemd-resolved (see [Mesh DNS](#mesh-dns)). `services.plexd.settings.dns.enabled = false;` turns the resolver off.
 - The node profile moves to systemd-networkd and systemd-resolved in the same change. A node that ran dhcpcd switches its DHCP client on that rebuild: dhcpcd removes its addresses when it stops (`networking.dhcpcd.persistent` is `false`), and networkd requests a lease with a client identifier of its own, so the node can come back on another IPv4 address. Keep the console login (`plexsphere.node.hashedPasswordFile`) at hand for that rebuild.
 - k3s restarts once on that rebuild, on every node: it now runs with `--resolv-conf=/run/systemd/resolve/resolv.conf`, systemd-resolved's list of uplink servers. k3s reads the file only at start, and `/etc/resolv.conf` is now resolved's `127.0.0.53` stub, which no pod can reach.
