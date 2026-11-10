@@ -489,6 +489,28 @@
             && ownStack.networking.dhcpcd.enable)
             "every node path must run systemd-networkd and systemd-resolved without dhcpcd or polkit, with /etc/resolv.conf on resolved's stub, and a host with networking.useNetworkd = false must keep dhcpcd without resolved";
 
+        # k3s reads the kubelet's resolv.conf only at start, so a node that
+        # moves to systemd-resolved under a running k3s would hand new pods
+        # the 127.0.0.53 stub. The flag names resolved's uplink file on server
+        # and agent alike, merges with --secrets-encryption rather than
+        # replacing it, and goes away with resolved, where the file does not
+        # exist.
+        k3s-uses-resolved-uplink =
+          let
+            flagsOf = modules: (evalNode ([ hostName sshKey ] ++ modules)).config.services.k3s.extraFlags;
+            uplink = "--resolv-conf=/run/systemd/resolve/resolv.conf";
+            server = flagsOf [ ];
+            agent = flagsOf [ { services.k3s.role = "agent"; } ];
+            ownStack = flagsOf [ { networking.useNetworkd = false; } ];
+          in
+          passIf "k3s-uses-resolved-uplink"
+            (lib.elem "--secrets-encryption" server
+              && lib.elem uplink server
+              && lib.elem uplink agent
+              && !(lib.elem "--secrets-encryption" agent)
+              && !(lib.any (lib.hasPrefix "--resolv-conf=") ownStack))
+            "k3s must get --resolv-conf=/run/systemd/resolve/resolv.conf beside --secrets-encryption on a server and alone on an agent whenever systemd-resolved runs, and no --resolv-conf flag without it";
+
         # plexd refuses to start on a malformed session_signing_public_key and
         # restarts on it forever, so the option has to turn every shape plexd
         # rejects into an evaluation error: no padding, the URL-safe

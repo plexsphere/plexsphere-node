@@ -187,8 +187,21 @@ in
     # or a backup that excludes the credential directory. Enabling it on an
     # already-running server encrypts newly written Secrets only — see the
     # README for the re-encryption step. Server-only flag.
-    services.k3s.extraFlags =
-      lib.mkIf (config.services.k3s.role == "server") [ "--secrets-encryption" ];
+    #
+    # k3s picks the kubelet's resolv.conf once, when it starts: the first of
+    # /etc/resolv.conf and /run/systemd/resolve/resolv.conf that names no
+    # loopback server. With systemd-resolved, /etc/resolv.conf is the
+    # 127.0.0.53 stub, which no pod can reach. A fresh node gets the uplink
+    # file anyway, but a k3s that started under dhcpcd keeps
+    # /etc/resolv.conf until it restarts, and every pod created meanwhile
+    # with dnsPolicy Default, CoreDNS included, gets the stub. Naming the
+    # uplink file restarts k3s once on the rebuild that brings resolved and
+    # holds from then on. The file lists the uplink servers only, never
+    # plexd's resolver on a non-53 port, so pods resolve no mesh name.
+    services.k3s.extraFlags = lib.mkMerge [
+      (lib.mkIf (config.services.k3s.role == "server") [ "--secrets-encryption" ])
+      (lib.mkIf config.services.resolved.enable [ "--resolv-conf=/run/systemd/resolve/resolv.conf" ])
+    ];
 
     services.plexd.enable = lib.mkDefault true;
 
