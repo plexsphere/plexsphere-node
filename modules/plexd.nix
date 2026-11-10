@@ -89,16 +89,17 @@ in
         (cfg.settings.wireguard.listen_port or 51820)
       ];
 
-      # Remote sessions from the control plane arrive over the mesh: plexd
-      # binds each session's listener to the node's mesh IP on a port the
+      # tcp sessions from the control plane arrive over the mesh: plexd
+      # binds each session's forward to the node's mesh IP on a port the
       # kernel picks, so the whole of the kernel's default ephemeral range
-      # (net.ipv4.ip_local_port_range, 32768-60999) has to be open. Only on
-      # the WireGuard interface, which follows interface_name: plexd's own
+      # (net.ipv4.ip_local_port_range, 32768-60999) has to be open. ssh
+      # sessions need none of it: since v0.20.0 plexd opens each of their
+      # connections out to the control plane over HTTPS. Only on the
+      # WireGuard interface, which follows interface_name: plexd's own
       # nftables chain hooks forward and never filters traffic addressed to
       # the host, so this rule is what keeps the range off every other
       # network. Within the mesh it is wide open. A tcp session's forward is
-      # unauthenticated (the first peer to connect takes the session), an ssh
-      # session's listener takes the session token as its password, and
+      # unauthenticated (the first peer to connect takes the session), and
       # any other socket bound to an ephemeral port on the mesh IP or the
       # wildcard address answers every peer too. Not tied to tunnel.enabled:
       # plexd forces that back on unless max_sessions is also set, so a

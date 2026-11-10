@@ -451,6 +451,14 @@
             touch $out
           '';
 
+        # plexd answers the Domain's mesh names from v0.29.0 on, the first
+        # release with its local resolver. An older binary runs none and
+        # registers nothing with systemd-resolved, so a pin moved back below
+        # it leaves every node without mesh names, and nothing else fails.
+        plexd-package-has-mesh-dns = passIf "plexd-package-has-mesh-dns"
+          (lib.versionAtLeast defaultNode.config.services.plexd.package.version "0.29.0")
+          "the pinned plexd must be v0.29.0 or later, the first release that answers mesh names";
+
         # plexd refuses to start on a malformed session_signing_public_key and
         # restarts on it forever, so the option has to turn every shape plexd
         # rejects into an evaluation error: no padding, the URL-safe
