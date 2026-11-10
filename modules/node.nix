@@ -213,6 +213,19 @@ in
 
     networking.useDHCP = lib.mkDefault true;
 
+    # plexd registers its mesh resolver with systemd-resolved, which nixpkgs
+    # runs with networkd. Beside dhcpcd it would get no DNS servers: dhcpcd
+    # runs as its own user and hands them over through a polkit rule, and
+    # no node runs polkit, so resolved would fall back to systemd's public
+    # resolvers. networkd feeds resolved directly, and useDHCP above becomes
+    # its 99-ethernet-default-dhcp.network, which matches physical ethernet
+    # only. plexd0 stays unmanaged, as resolved requires of a link plexd
+    # configures, and wait-online's anyInterface follows useDHCP, so
+    # network-online.target still comes with the first interface online.
+    # mkDefault: a host that owns its network stack sets this to false and
+    # keeps resolved fed itself.
+    networking.useNetworkd = lib.mkDefault true;
+
     time.timeZone = lib.mkDefault "UTC";
   };
 }

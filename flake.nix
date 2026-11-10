@@ -459,6 +459,36 @@
           (lib.versionAtLeast defaultNode.config.services.plexd.package.version "0.29.0")
           "the pinned plexd must be v0.29.0 or later, the first release that answers mesh names";
 
+        # plexd registers its mesh resolver with systemd-resolved, so every
+        # node path has to run it, fed by networkd. dhcpcd beside it hands it
+        # no DNS servers without polkit, which no node runs, so neither may
+        # come back. /etc/resolv.conf has to be resolved's stub, or programs
+        # that read it never ask resolved for a mesh name. The install target
+        # gets a host name first: environment.etc forces networking.hostName,
+        # which throws there until the installer injects one. A host that
+        # sets useNetworkd = false keeps dhcpcd and gets no resolved.
+        node-runs-resolved =
+          let
+            runsResolved = host:
+              host.networking.useNetworkd
+              && host.services.resolved.enable
+              && !host.networking.dhcpcd.enable
+              && !host.security.polkit.enable
+              && host.systemd.network.wait-online.anyInterface
+              && toString host.environment.etc."resolv.conf".source == "/run/systemd/resolve/stub-resolv.conf";
+            ownStack = (evalNode [ hostName sshKey { networking.useNetworkd = false; } ]).config;
+          in
+          passIf "node-runs-resolved"
+            (lib.all runsResolved [
+              defaultNode.config
+              (takeoverHost "x86_64-linux" [ sshKey ]).config
+              (self.lib.installTargets.x86_64-linux.extendModules { modules = [ hostName ]; }).config
+              imageSystems.x86_64-linux.config
+            ]
+            && !ownStack.services.resolved.enable
+            && ownStack.networking.dhcpcd.enable)
+            "every node path must run systemd-networkd and systemd-resolved without dhcpcd or polkit, with /etc/resolv.conf on resolved's stub, and a host with networking.useNetworkd = false must keep dhcpcd without resolved";
+
         # plexd refuses to start on a malformed session_signing_public_key and
         # restarts on it forever, so the option has to turn every shape plexd
         # rejects into an evaluation error: no padding, the URL-safe
