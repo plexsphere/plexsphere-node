@@ -4,7 +4,7 @@ A Nix flake that turns a machine into a Plexsphere node: from bare metal, from a
 
 - **k3s**, enabled as a single-node server
 - **plexd** as a systemd service on the host (not a k3s workload), running the prebuilt release binary from [plexsphere/plexd](https://github.com/plexsphere/plexd); it connects the node to the Plexsphere control plane
-- a declarative disk layout, network configuration and host identity (host name, root SSH keys)
+- a declarative disk layout, network configuration (systemd-networkd and systemd-resolved) and host identity (host name, root SSH keys)
 - **x86_64** and **aarch64**
 
 ## Provisioning paths
@@ -357,6 +357,8 @@ Import the node module into the host configuration:
 
 `nixosModules.node` leaves the disk layout, `fileSystems` and the boot loader alone. `nixosModules.disk`, which the other paths add, carries the disko layout (GPT, ESP, ext4) with systemd-boot, or hybrid BIOS/UEFI GRUB with `plexsphere.disk.biosBoot`.
 
+The module does set the network stack: `networking.useNetworkd` defaults to `true`, and nixpkgs runs systemd-resolved with it, which plexd registers the mesh names with. On a machine that ran dhcpcd, the first rebuild switches its DHCP client (see [Upgrading plexd](#upgrading-plexd)). A host that owns its network stack sets `networking.useNetworkd = false;` and keeps it, but then gets no systemd-resolved from this module. For mesh names it has to run systemd-resolved and feed it DNS servers itself: networkd and NetworkManager do that, while dhcpcd needs polkit for nixpkgs' rule that lets it hand them over.
+
 The profile passes `--secrets-encryption` to k3s. On a machine that already ran k3s, only Secrets written from then on are encrypted. Re-encrypt the existing ones once after the first rebuild:
 
 ```bash
@@ -497,3 +499,4 @@ Moving to v0.29.0:
 - ssh sessions need a control plane that asks plexd to open each connection ([plexsphere/plexsphere#928](https://github.com/plexsphere/plexsphere/issues/928)). Behind an older control plane no ssh login succeeds, and there is no fallback listener on the mesh, so upgrade the control plane first.
 - With `wireguard.mtu` unset or `0`, plexd measures the uplink's path MTU at start and every 10 minutes and sizes `plexd0` to it minus 80 bytes, between 1280 and 1420. A positive value pins the MTU and turns the measurement off.
 - Rolled-out hooks are on (see [Hook scripts](#hook-scripts)).
+- The node profile moves to systemd-networkd and systemd-resolved in the same change. A node that ran dhcpcd switches its DHCP client on that rebuild: dhcpcd removes its addresses when it stops (`networking.dhcpcd.persistent` is `false`), and networkd requests a lease with a client identifier of its own, so the node can come back on another IPv4 address. Keep the console login (`plexsphere.node.hashedPasswordFile`) at hand for that rebuild.
